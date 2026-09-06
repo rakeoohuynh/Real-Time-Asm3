@@ -19,6 +19,7 @@ o.be/
 *.out
 *.full
 *.sym
+build/
 
 # Windows debug symbols (MSVC/PDB - shows up when building/debugging
 # on a Windows host, e.g. vc140.pdb)

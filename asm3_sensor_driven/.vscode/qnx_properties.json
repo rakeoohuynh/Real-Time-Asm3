@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "template": {
+    "projectId": "asm3_sensor_driven",
+    "artifactName": "asm3_sensor_driven",
+    "buildType": "QnxRecMake",
+    "language": "c",
+    "archlist": "x86_64,aarch64le",
+    "artifactType": "Executable"
+  }
+}
