@@ -3,20 +3,25 @@
  * ---------------------------------------------------------------------
  * Proof-of-concept: SENSOR-DRIVEN mode for one intersection's
  * Phase_Controller_Task. Covers UC-02 (vehicle sensors, both NS and EW)
- * plus UC-04 (pedestrian crossing request), matching the report's
- * assumptions and alternative flows:
+ * plus UC-04 (pedestrian crossing request).
  *
  *   EW green -> NS car sensor fires -> switch to NS
  *   NS green -> EW car sensor fires -> switch to EW
- *   Pedestrian button (either direction) -> forces BOTH directions to
- *   stop (YELLOW -> ALL-RED -> WALK -> CLEARANCE) before vehicle
- *   control resumes, exactly as UC-04's Main Flow describes.
+ *   Pedestrian button press (keyboard, see below) -> forces BOTH
+ *   directions to stop (YELLOW -> ALL-RED -> WALK -> CLEARANCE) before
+ *   vehicle control resumes, exactly as UC-04's Main Flow describes.
+ *
+ * PEDESTRIAN INPUT (this version): a separate Pedestrian_Input_Task
+ * thread reads from stdin. Type 'p' then Enter to simulate a real
+ * pedestrian pressing the crossing button - this mirrors the report's
+ * architecture where a dedicated Pedestrian_Input_Task debounces the
+ * physical button and sends PED_REQUEST (here: MsgSendPulse) to
+ * Phase_Controller_Task, rather than the controller polling hardware
+ * itself. Vehicle sensors are still timer-simulated (unchanged).
  *
  * Vehicle sensor timing values: A2, A3, A5 (Section 1.2)
  * Pedestrian timing values:     A8 (WALK=12s), A9 (CLEARANCE=4s),
- *                                A11 (debounce), A12 (latch),
- *                                A13 (doesn't interrupt fixed-timing -
- *                                N/A here since we're SENSOR_DRIVEN)
+ *                                A11 (debounce=50ms), A12 (latch)
  *
  * UC-04 alternative flows implemented:
  *   A1 - repeated button press while a request is pending -> ignored
@@ -25,9 +30,9 @@
  *   A3 - request arrives during YELLOW/ALL-RED -> latched, serviced
  *        at the next ALL-RED boundary
  *   A5 - SENSOR_DRIVEN: pedestrian demand is reconsidered by the
- *        scheduler alongside vehicle demand (pedestrian is serviced
- *        with priority over a same-cycle vehicle-sensor request,
- *        since it also satisfies whichever direction was requested)
+ *        scheduler alongside vehicle demand (pedestrian is given
+ *        priority over a same-cycle vehicle-sensor request once
+ *        min-green is satisfied)
  *
  * IPC design (consistent with Section 8 message table conventions):
  *   - All events into Phase_Controller_Task arrive as PULSES on a
@@ -36,7 +41,9 @@
  *   - PULSE_CODE_PHASE_TIMER  : drives the normal FSM cycle.
  *   - PULSE_CODE_CAR_SENSOR_NS: simulated NS vehicle sensor event.
  *   - PULSE_CODE_CAR_SENSOR_EW: simulated EW vehicle sensor event.
- *   - PULSE_CODE_PED_BUTTON   : simulated pedestrian push-button event.
+ *   - PULSE_CODE_PED_BUTTON   : pedestrian push-button event, sent
+ *                                explicitly by Pedestrian_Input_Task
+ *                                via MsgSendPulse() (not a kernel timer).
  *
  * Build (QNX Momentics / qcc):
  *   qcc -Vgcc_ntoaarch64le -o sensor_demo sensor_driven_switch_demo.c
@@ -44,6 +51,7 @@
  *
  * Run:
  *   ./sensor_demo
+ *   (then type p + Enter at any time to simulate a pedestrian press)
  * ---------------------------------------------------------------------
  */
 
@@ -53,6 +61,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <pthread.h>
 #include <sys/neutrino.h>
 #include <sys/dispatch.h>
 
@@ -63,8 +72,6 @@
 #define PULSE_CODE_PED_BUTTON     (_PULSE_CODE_MINAVAIL + 3)
 
 /* ---------------- Timing: from report Section 1.2 assumptions ------
- * These are the actual values used throughout our design, taken
- * directly from the Initial Design Report (Section 1.2):
  *   A2  Vehicle YELLOW                                  =  3000 ms
  *   A3  ALL-RED clearance                               =  2000 ms
  *   A5  Minimum GREEN before a phase may be terminated  = 15000 ms
@@ -72,21 +79,17 @@
  *   A8  Pedestrian WALK                                 = 12000 ms
  *   A9  Pedestrian flashing CLEARANCE                   =  4000 ms
  *   A11 Pedestrian push-button debounce                 =    50 ms
- * No artificial speed-up is applied - this runs at the same timing
- * used in the rest of our codebase / other tasks.
+ * No artificial speed-up is applied - real timing throughout.
  * --------------------------------------------------------------------*/
 #define YELLOW_MS         3000   /* A2 */
 #define ALL_RED_MS        2000   /* A3 */
 #define MIN_GREEN_MS     15000   /* A5 safety guard - SENSOR_DRIVEN mode only enforces this floor */
 #define PED_WALK_MS      12000   /* A8 */
 #define PED_CLEARANCE_MS  4000   /* A9 */
-#define PED_DEBOUNCE_MS     50   /* A11 - noted here; a real GPIO/IRQ input task would apply this
-                                     before ever emitting PULSE_CODE_PED_BUTTON */
+#define PED_DEBOUNCE_MS     50   /* A11 - enforced here in Pedestrian_Input_Task */
 
 #define CAR_ARRIVAL_MS    5000   /* simulated vehicle sensor delay; intentionally < MIN_GREEN_MS
                                      so the demo exercises the queued path */
-#define PED_ARRIVAL_MS    9000   /* simulated pedestrian button delay (also < MIN_GREEN_MS,
-                                     so the demo exercises UC-04 alt flow A2) */
 #define POLL_MS           1000   /* re-check interval once min-green has elapsed */
 
 typedef enum {
@@ -124,7 +127,6 @@ static int      chid;
 static timer_t  phase_timer;
 static timer_t  ns_sensor_timer;
 static timer_t  ew_sensor_timer;
-static timer_t  ped_button_timer;
 
 static uint64_t now_ms(void) {
     struct timespec ts;
@@ -156,12 +158,6 @@ static void schedule_opposite_car(phase_t green_phase) {
         arm_timer_once(ew_sensor_timer, CAR_ARRIVAL_MS);
         printf("            (simulated EW car will arrive in %dms)\n", CAR_ARRIVAL_MS);
     }
-}
-
-/* Schedule the next simulated pedestrian button press. */
-static void schedule_pedestrian(void) {
-    arm_timer_once(ped_button_timer, PED_ARRIVAL_MS);
-    printf("            (simulated pedestrian will press button in %dms)\n", PED_ARRIVAL_MS);
 }
 
 /* Move the FSM to a new phase, log it, (re)arm the phase timer, and if
@@ -236,10 +232,6 @@ static void handle_ew_sensor_event(void) {
  * A2 - press during vehicle minimum GREEN -> latched, waits for MIN_GREEN_MS
  * A3 - press during YELLOW/ALL-RED -> latched, served at next ALL-RED
  * A5 - SENSOR_DRIVEN: pedestrian demand reconsidered by the scheduler
- *      (here: pedestrian is given priority over a same-cycle vehicle
- *      sensor request once min-green is satisfied, since stopping
- *      traffic for the pedestrian also resolves the vehicle demand
- *      for the opposite direction)
  * ---------------------------------------------------------------------*/
 static void handle_ped_button_event(void) {
     printf("[t=%6llums] SENSOR   : pedestrian button pressed\n",
@@ -350,14 +342,47 @@ static void handle_phase_timer(void) {
                     after_all_red == PHASE_NS_GREEN ?
                         "NS now has right of way (post-pedestrian)" :
                         "EW now has right of way (post-pedestrian)");
-        schedule_pedestrian();  /* simulate the next pedestrian arrival for the demo */
         break;
     }
+}
+
+/* ---------------- Pedestrian_Input_Task ------------------------------
+ * Separate thread mirroring the report's architecture: a dedicated
+ * input task owns the physical button (here: stdin), applies debounce
+ * (A11), and sends a PED_REQUEST pulse to Phase_Controller_Task. The
+ * controller itself never touches stdin/hardware directly.
+ *
+ * Type 'p' then Enter at the console at any time to simulate a press.
+ * ---------------------------------------------------------------------*/
+static void *pedestrian_input_task(void *arg) {
+    (void)arg;
+    int coid = ConnectAttach(0, 0, chid, _NTO_SIDE_CHANNEL, 0);
+    if (coid == -1) { perror("ConnectAttach (Pedestrian_Input_Task)"); return NULL; }
+
+    printf("[Pedestrian_Input_Task] ready - type 'p' then Enter to press the crossing button.\n");
+    fflush(stdout);
+
+    uint64_t last_press_ms = 0;
+    char     line[16];
+
+    while (fgets(line, sizeof(line), stdin) != NULL) {
+        if (line[0] != 'p' && line[0] != 'P') {
+            continue;
+        }
+        uint64_t t = now_ms();
+        if (t - last_press_ms < PED_DEBOUNCE_MS) {
+            continue;  /* A11: debounce - suppress bounce within 50ms */
+        }
+        last_press_ms = t;
+        MsgSendPulse(coid, SIGEV_PULSE_PRIO_INHERIT, PULSE_CODE_PED_BUTTON, 0);
+    }
+    return NULL;
 }
 
 int main(void) {
     struct sigevent event;
     int coid;
+    pthread_t ped_input_thread;
 
     chid = ChannelCreate(0);
     if (chid == -1) { perror("ChannelCreate"); exit(EXIT_FAILURE); }
@@ -377,18 +402,18 @@ int main(void) {
     SIGEV_PULSE_INIT(&event, coid, SIGEV_PULSE_PRIO_INHERIT, PULSE_CODE_CAR_SENSOR_EW, 0);
     timer_create(CLOCK_REALTIME, &event, &ew_sensor_timer);
 
-    /* --- pedestrian push-button timer --- */
-    coid = ConnectAttach(0, 0, chid, _NTO_SIDE_CHANNEL, 0);
-    SIGEV_PULSE_INIT(&event, coid, SIGEV_PULSE_PRIO_INHERIT, PULSE_CODE_PED_BUTTON, 0);
-    timer_create(CLOCK_REALTIME, &event, &ped_button_timer);
+    /* --- Pedestrian_Input_Task: real keyboard-triggered button --- */
+    if (pthread_create(&ped_input_thread, NULL, pedestrian_input_task, NULL) != 0) {
+        perror("pthread_create (Pedestrian_Input_Task)");
+        exit(EXIT_FAILURE);
+    }
 
-    printf("=== Sensor-driven demo: NS/EW vehicle sensors + pedestrian button (UC-02 + UC-04) ===\n");
+    printf("=== Sensor-driven demo: NS/EW vehicle sensors (timer) + pedestrian button (keyboard) ===\n");
     printf("Assumption: EW currently GREEN, NS RED to start.\n\n");
 
     /* enter_phase() automatically schedules the NS vehicle sensor here,
      * since we are entering PHASE_EW_GREEN. */
     enter_phase(PHASE_EW_GREEN, MIN_GREEN_MS, "startup assumption: EW has right of way");
-    schedule_pedestrian();   /* first simulated pedestrian arrival */
 
     for (;;) {
         struct _pulse pulse;
