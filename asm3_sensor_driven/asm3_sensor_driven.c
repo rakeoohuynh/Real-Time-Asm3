@@ -280,7 +280,9 @@ static void handle_phase_timer(void) {
 
     case PHASE_EW_GREEN:
         if (ped_pending) {
-            ped_pending = 0;
+            /* do NOT clear ped_pending here - it stays latched until the
+             * WALK phase actually begins (at ALL_RED below); clearing it
+             * this early made the FSM skip straight past PED_WALK/CLEARANCE */
             ns_sensor_pending = 0;
             after_all_red = PHASE_NS_GREEN;
             enter_phase(PHASE_EW_YELLOW, YELLOW_MS,
@@ -297,7 +299,8 @@ static void handle_phase_timer(void) {
 
     case PHASE_NS_GREEN:
         if (ped_pending) {
-            ped_pending = 0;
+            /* same fix as EW_GREEN above: leave ped_pending latched until
+             * PED_WALK actually begins at ALL_RED */
             ew_sensor_pending = 0;
             after_all_red = PHASE_EW_GREEN;
             enter_phase(PHASE_NS_YELLOW, YELLOW_MS,
