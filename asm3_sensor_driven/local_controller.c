@@ -813,6 +813,47 @@ static void phase_controller_task(lc_context_t *ctx)
 }
 
 /* =========================================================================
+ * probe_cc_connectivity -- one-shot startup connectivity self-check.
+ *   Prints a clear REACHABLE/NOT REACHABLE verdict for the CC's channel
+ *   so a QNET/WiFi problem shows up immediately during setup instead of
+ *   only being noticed later as "status updates never appear on the CC".
+ *   This is purely diagnostic: whatever the result, the LC still starts
+ *   normally and Status_Reporting_Task keeps retrying in the background
+ *   per UC-08 -- a failed probe here is a network hint, not a fatal error.
+ * ========================================================================= */
+static void probe_cc_connectivity(lc_context_t *ctx)
+{
+    const char *target = ctx->cc_node[0] ? ctx->cc_node : "<same node>";
+    printf("[I%d] checking connectivity to CC (target node: %s) ...\n", ctx->id, target);
+    fflush(stdout);
+
+    const int max_attempts = 5;
+    for (int attempt = 1; attempt <= max_attempts; attempt++) {
+        int probe = connect_to_cc(ctx);
+        if (probe >= 0) {
+            printf("[I%d] CC REACHABLE (attempt %d/%d) -- channel '%s' resolved OK over %s\n",
+                   ctx->id, attempt, max_attempts, CC_CHANNEL_NAME,
+                   ctx->cc_node[0] ? "QNET" : "same node");
+            fflush(stdout);
+            ConnectDetach(probe);
+            return;
+        }
+        printf("[I%d] CC not reachable yet (attempt %d/%d, errno=%d: %s)\n",
+               ctx->id, attempt, max_attempts, errno, strerror(errno));
+        fflush(stdout);
+        if (attempt < max_attempts) sleep(1);
+    }
+
+    printf("[I%d] *** CC NOT REACHABLE after %d attempts ***\n"
+           "     Check: CC process running? Same WiFi/subnet? QNET (io-pkt + npm-qnet.so)\n"
+           "     mounted on both machines? Node name '%s' correct (try `ls /net/%s/dev/name/local/`\n"
+           "     from a shell on this machine)? -- LC will still start and operate autonomously;\n"
+           "     Status_Reporting_Task keeps retrying in the background (UC-08).\n",
+           ctx->id, max_attempts, target, target);
+    fflush(stdout);
+}
+
+/* =========================================================================
  * main() -- wires up channels/connections and spawns every task.
  * ========================================================================= */
 int main(int argc, char **argv)
@@ -854,6 +895,8 @@ int main(int argc, char **argv)
     printf("=== Local Controller I%d starting (CC node: %s) ===\n",
            g_ctx.id, g_ctx.cc_node[0] ? g_ctx.cc_node : "<same node>");
     fflush(stdout);
+
+    probe_cc_connectivity(&g_ctx);
 
     pthread_t th;
     pthread_create(&th, NULL, signal_output_task, &g_ctx);          pthread_detach(th);
