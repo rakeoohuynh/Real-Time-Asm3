@@ -1,0 +1,11 @@
+# Build output
+bin/
+
+# QNX Momentics / Eclipse CDT project metadata (generated on import)
+.metadata/
+.settings/
+.project
+.cproject
+
+# macOS
+.DS_Store
