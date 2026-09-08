@@ -64,6 +64,34 @@ reuses that to open the OVERRIDE_COMMAND/MODE_SWITCH connection back.
 | CC override with LC-side safety check | `central_command_server_task()` validates before accepting, `apply_pending_cc_commands()` applies |
 | Boom gate + fault reporting to control room | `boom_gate_task()`, `advance_rail_sequence()` FAULT_BOOM_GATE branch |
 
+## Startup connectivity self-check
+
+Every `local_controller` run begins with `probe_cc_connectivity()`: it
+tries `name_open()` to the CC's channel up to 5 times (1s apart) and
+prints a clear `CC REACHABLE` / `CC NOT REACHABLE` verdict before
+anything else starts, e.g.:
+
+```
+[I2] checking connectivity to CC (target node: machineA) ...
+[I2] CC REACHABLE (attempt 1/5) -- channel 'central_controller' resolved OK over QNET
+```
+
+or, if WiFi/QNET isn't wired up yet:
+
+```
+[I2] *** CC NOT REACHABLE after 5 attempts ***
+     Check: CC process running? Same WiFi/subnet? QNET (io-pkt + npm-qnet.so)
+     mounted on both machines? Node name 'machineA' correct (try `ls /net/machineA/dev/name/local/`
+     from a shell on this machine)? -- LC will still start and operate autonomously;
+     Status_Reporting_Task keeps retrying in the background (UC-08).
+```
+
+This is diagnostic only -- the LC starts and runs normally either way
+(matching the "operate autonomously if the link fails" requirement);
+a failed probe just tells you immediately that it's a network/QNET
+setup issue rather than something wrong in the control logic, so you
+can fix it before the demo instead of during it.
+
 ## Known PoC simplifications (documented, not hidden)
 
 - STATUS_UPDATE/FAULT_ALARM are sent as a short blocking `MsgSend()`
@@ -78,4 +106,4 @@ reuses that to open the OVERRIDE_COMMAND/MODE_SWITCH connection back.
 - `netmgr_ndtostr()`/`ND2S_LOCAL_STR` usage in `central_controller.c`
   should be checked against the exact SDP 7.1 header on your machine
   before the demo -- the flag name has moved slightly between QNX
-  releases.git
+  releases.
