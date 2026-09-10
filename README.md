@@ -10,6 +10,11 @@ It does not implement sensor-driven mode, mode switching, pedestrian crossings,
 central override, or the railway crossing subsystem — see **Scope** below for
 why.
 
+> **Multi-PC bridged network test:** for the mandatory cross-computer Qnet
+> verification (three physical PCs, bridged networking, no NAT/host-only), see
+> [`NETWORK_TESTING.md`](NETWORK_TESTING.md) — a separate procedure that
+> doesn't require any code changes.
+
 ---
 
 ## 1. Scope
