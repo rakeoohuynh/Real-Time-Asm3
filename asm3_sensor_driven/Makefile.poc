@@ -1,0 +1,61 @@
+# =====================================================================
+# Makefile.poc -- builds the LC/CC proof-of-concept.
+#
+#   make -f Makefile.poc              # both binaries, demo timing
+#   make -f Makefile.poc SCALE=1      # real-world timing (A40 off)
+#   make -f Makefile.poc clean
+#
+# Kept separate from the Momentics recursive Makefile in this directory:
+# that one globs every .c in the folder into a single target, which
+# cannot work now that the folder holds three programs with their own
+# main(). See the note in README.md.
+# =====================================================================
+
+CC      ?= qcc
+TARGETV ?= -Vgcc_ntox86_64
+SCALE   ?= 5
+
+CFLAGS  = $(TARGETV) -Wall -Wextra -Wno-unused-parameter -DTIME_SCALE_FACTOR=$(SCALE)
+LDLIBS  = -lpthread -lsocket
+
+LC_SRCS = \
+	local_controller.c \
+	lc_context.c \
+	phase_table.c \
+	signal_output.c \
+	boom_gate.c \
+	railway_protection.c \
+	train_schedule.c \
+	pedestrian.c \
+	fixed_timing.c \
+	sensor_driven.c \
+	right_turn.c \
+	status_report.c \
+	central_command_server.c \
+	console_input.c
+
+CC_SRCS = central_controller.c
+
+LC_OBJS = $(LC_SRCS:.c=.o)
+CC_OBJS = $(CC_SRCS:.c=.o)
+
+HEADERS = common.h lc_context.h phase_table.h signal_output.h boom_gate.h \
+          railway_protection.h train_schedule.h pedestrian.h fixed_timing.h \
+          sensor_driven.h right_turn.h status_report.h central_command_server.h \
+          console_input.h
+
+all: local_controller central_controller
+
+local_controller: $(LC_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LC_OBJS) $(LDLIBS)
+
+central_controller: $(CC_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(CC_OBJS) $(LDLIBS)
+
+%.o: %.c $(HEADERS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(LC_OBJS) $(CC_OBJS) local_controller central_controller
+
+.PHONY: all clean

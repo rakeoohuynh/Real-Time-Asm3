@@ -61,6 +61,8 @@ typedef struct {
     lc_phase_t       phase;
     vehicle_state_t  ns_state, ew_state;
     ped_state_t      ped_state;
+    arrow_state_t    ns_arrow, ew_arrow;
+    gate_state_t     gate_state;
     control_mode_t   mode;
     uint32_t         fault_flags;
     int              last_fault_code;
@@ -92,6 +94,22 @@ static const char *phname(lc_phase_t p)
 static const char *pname_local(ped_state_t s)
 {
     switch (s) { case P_WALK: return "WALK"; case P_CLEARANCE: return "CLEARANCE"; default: return "DONT_WALK"; }
+}
+/* Right-turn arrows are reported separately from the main 3-colour
+ * state, so the dashboard can show a green arrow beside a red main. */
+static const char *aname(arrow_state_t s)
+{
+    return (s == ARROW_GREEN) ? "ARROW" : "-";
+}
+static const char *gname(gate_state_t g)
+{
+    switch (g) {
+        case GATE_OPEN:         return "OPEN";
+        case GATE_LOWERING:     return "LOWERING";
+        case GATE_LOCKED:       return "LOCKED";
+        case GATE_RAISING:      return "RAISING";
+        default:                return "FAULT";
+    }
 }
 
 static lc_record_t *find_or_create(int id)
@@ -139,6 +157,9 @@ static void *comm_worker(void *arg)
             rec->ns_state    = msg.ns_state;
             rec->ew_state    = msg.ew_state;
             rec->ped_state   = msg.ped_state;
+            rec->ns_arrow    = msg.ns_arrow;
+            rec->ew_arrow    = msg.ew_arrow;
+            rec->gate_state  = msg.gate_state;
             rec->mode        = msg.mode;
             rec->fault_flags = msg.fault_flags;
             rec->last_update = msg.timestamp;
@@ -151,9 +172,11 @@ static void *comm_worker(void *arg)
             printf("[CC][Central_Communication_Task#%d] *** FAULT_ALARM *** I%d fault=%d head=%d\n",
                    worker_no, msg.intersection_id, msg.fault_code, msg.head_id);
         } else {
-            printf("[CC][Central_Communication_Task#%d] STATUS_UPDATE I%d phase=%s ns=%s ew=%s ped=%s mode=%s\n",
+            printf("[CC][Central_Communication_Task#%d] STATUS_UPDATE I%d phase=%s ns=%s(%s) ew=%s(%s) ped=%s gate=%s mode=%s\n",
                    worker_no, msg.intersection_id, phname(msg.phase),
-                   vname(msg.ns_state), vname(msg.ew_state), pname_local(msg.ped_state), mname(msg.mode));
+                   vname(msg.ns_state), aname(msg.ns_arrow),
+                   vname(msg.ew_state), aname(msg.ew_arrow),
+                   pname_local(msg.ped_state), gname(msg.gate_state), mname(msg.mode));
         }
         fflush(stdout);
     }
@@ -175,9 +198,12 @@ static void *display_task(void *arg)
             if (!g_lc[i].in_use) continue;
             lc_record_t *r = &g_lc[i];
             time_t age = time(NULL) - r->last_update;
-            printf(" I%d  phase=%-11s ns=%-6s ew=%-6s ped=%-9s mode=%-13s faults=0x%02x  (%lds ago)\n",
-                   r->id, phname(r->phase), vname(r->ns_state), vname(r->ew_state),
-                   pname_local(r->ped_state), mname(r->mode), r->fault_flags, (long)age);
+            printf(" I%d  phase=%-11s ns=%-6s/%-5s ew=%-6s/%-5s ped=%-9s gate=%-8s mode=%-13s faults=0x%02x  (%lds ago)\n",
+                   r->id, phname(r->phase),
+                   vname(r->ns_state), aname(r->ns_arrow),
+                   vname(r->ew_state), aname(r->ew_arrow),
+                   pname_local(r->ped_state), gname(r->gate_state),
+                   mname(r->mode), r->fault_flags, (long)age);
         }
         pthread_mutex_unlock(&g_lc_lock);
         printf("==========================================================\n\n");
@@ -302,9 +328,12 @@ static void print_status_table(void)
     for (int i = 0; i < MAX_TRACKED_LC; i++) {
         if (!g_lc[i].in_use) continue;
         lc_record_t *r = &g_lc[i];
-        printf(" I%d  phase=%-11s ns=%-6s ew=%-6s ped=%-9s mode=%-13s faults=0x%02x\n",
-               r->id, phname(r->phase), vname(r->ns_state), vname(r->ew_state),
-               pname_local(r->ped_state), mname(r->mode), r->fault_flags);
+        printf(" I%d  phase=%-11s ns=%-6s/%-5s ew=%-6s/%-5s ped=%-9s gate=%-8s mode=%-13s faults=0x%02x\n",
+               r->id, phname(r->phase),
+               vname(r->ns_state), aname(r->ns_arrow),
+               vname(r->ew_state), aname(r->ew_arrow),
+               pname_local(r->ped_state), gname(r->gate_state),
+               mname(r->mode), r->fault_flags);
     }
     pthread_mutex_unlock(&g_lc_lock);
 }
