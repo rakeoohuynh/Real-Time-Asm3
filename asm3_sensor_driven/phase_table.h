@@ -4,7 +4,7 @@
  * The phase table: which movements each sequencing step permits.
  *
  * Before the split this knowledge was implicit, scattered across the
- * begin_*/advance_* functions. It is stated once here because the
+ * begin_* / advance_* functions. It is stated once here because the
  * right-turn arrow needs to ask "is this auxiliary movement permitted
  * right now", and because a table can be validated at startup for the
  * conflicts that matter (two conflicting through movements green at

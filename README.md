@@ -50,6 +50,71 @@ need any equivalent flag -- it discovers each LC's node automatically
 from the sender info on the first STATUS_UPDATE it receives, then
 reuses that to open the OVERRIDE_COMMAND/MODE_SWITCH connection back.
 
+## Central Controller -- operator console commands
+
+The CC prints its command list on startup. One command per line on stdin:
+
+| Command | Effect |
+|---|---|
+| `status` | Print the tracked-intersection table: current phase, NS/EW vehicle state and right-turn arrow, pedestrian state, boom gate state, control mode, fault flags |
+| `override <id> <type>` | Send an OVERRIDE_COMMAND to intersection `<id>` |
+| `mode <id> <fixed\|sensor>` | Send a MODE_SWITCH to intersection `<id>` |
+| `quit` | Leave the operator console |
+
+`<id>` is the number passed to the LC's `-i` flag. The four override types:
+
+| Type | Effect on the LC |
+|---|---|
+| `allred` | Force both approaches to RED and hold |
+| `nsgreen` | Force the NS approach green and hold |
+| `ewgreen` | Force the EW approach green and hold |
+| `dignitary` | Dignitary path; currently the same forced-NS-green sequence |
+
+A forced state is held for `OVERRIDE_HOLD_S` (20 s, scaled by
+`TIME_SCALE_FACTOR`) before the normal cycle resumes. An intersection does
+not have to be known to the CC yet: the registry entry is created on
+demand, though the command can only be delivered once that LC's first
+STATUS_UPDATE has revealed its node.
+
+### When an override is refused
+
+The LC validates every override twice, so `override` is not guaranteed to
+take effect. `Central_Command_Server_Task` replies `NET_RESULT_WAIT` with a
+reason and an estimated wait if railway protection is active or a
+pedestrian is mid-crossing. If either condition starts in the gap between
+acceptance and application, `apply_pending_cc_commands()` discards the
+command and prints `OVERRIDE_COMMAND ... DISCARDED`. MODE_SWITCH is always
+accepted; it changes sequencing policy, not the current signal state.
+
+## Local Controller -- flags and keys
+
+```
+./local_controller -i <id> [-c <cc_node>] [-T HH:MM] [-N]
+```
+
+| Flag | Meaning |
+|---|---|
+| `-i <id>` | Intersection id, e.g. `-i 1` for I1. Also fixes this LC's own channel name, `lc_I<id>`, which the CC opens to send commands back |
+| `-c <node>` | QNET node the CC runs on. Omit for same-node testing |
+| `-T HH:MM` | Seed the simulated clock, e.g. `-T 06:28` to start just before a morning peak train |
+| `-N` | Do not run the train timetable; trains then arrive only via the `t` key |
+
+The LC prints its key list on startup. Each key is one line on stdin:
+
+| Key | Simulated event |
+|---|---|
+| `p` | Pedestrian button press |
+| `n` | Vehicle detected on the NS approach |
+| `e` | Vehicle detected on the EW approach |
+| `t` | Train approaching; starts railway protection |
+| `c` | Train cleared; ends railway protection |
+| `q` | Stop the input task. The control tasks keep running |
+
+`n` and `e` only change the outcome in sensor-driven mode, where absent
+demand lets the current green be cut early. In fixed-timing mode the cycle
+runs to its full length regardless. `t` and `c` work in both modes, since
+railway protection outranks everything else.
+
 ## Where each requirement lands in the code
 
 | Requirement | Where |
