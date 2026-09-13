@@ -132,8 +132,12 @@ static inline void lc_channel_name(char *buf, size_t len, int intersection_id)
 #define NIGHT_START_SOD           SOD(22,  0)
 #define NIGHT_END_SOD             SOD( 6, 30)
 
-#define TRAIN_HEADWAY_PEAK_S       120   /* ~2 min apart during peak      */
-#define TRAIN_HEADWAY_OFFPEAK_S   1200   /* ~20 min apart off-peak        */
+/* Peak/off-peak headways are given in REAL time and converted to the
+ * simulated clock, so the spacing a tester sees stays the same at any
+ * TIME_SCALE_FACTOR and leaves room between closures for pedestrian
+ * tests (one closure is ~90 s simulated). */
+#define TRAIN_HEADWAY_PEAK_S      (2 * 60 * TIME_SCALE_FACTOR)  /* 2 min real */
+#define TRAIN_HEADWAY_OFFPEAK_S   (4 * 60 * TIME_SCALE_FACTOR)  /* 4 min real */
 #define TRAIN_HEADWAY_NIGHT_S     1800   /* Fri/Sat night runs only       */
 
 /* --- Right-turn arrow (auxiliary movement) ---------------------------- */
