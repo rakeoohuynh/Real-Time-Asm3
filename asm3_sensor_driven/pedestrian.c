@@ -32,7 +32,7 @@ int pedestrian_request_pending(lc_context_t *ctx)
 
 void pedestrian_begin_walk(lc_context_t *ctx)
 {
-    ctx->ped_state = P_WALK;
+    lc_set_ped_state(ctx, P_WALK);
     signal_set_pedestrian(ctx, HEAD_PED_CROSSING, P_WALK, PED_WALK_S);
     lc_enter_step_seconds(ctx, STEP_PED_WALK, PED_WALK_S);
     lc_set_phase(ctx, LC_PHASE_PED);
@@ -44,14 +44,14 @@ int pedestrian_advance(lc_context_t *ctx)
     switch (ctx->step) {
 
     case STEP_PED_WALK:
-        ctx->ped_state = P_CLEARANCE;
+        lc_set_ped_state(ctx, P_CLEARANCE);
         signal_set_pedestrian(ctx, HEAD_PED_CROSSING, P_CLEARANCE, PED_CLEARANCE_S);
         lc_enter_step_seconds(ctx, STEP_PED_CLEARANCE, PED_CLEARANCE_S);
         notify_status(ctx, 0, 0, 0);
         return 1;
 
     case STEP_PED_CLEARANCE:
-        ctx->ped_state = P_DONT_WALK;
+        lc_set_ped_state(ctx, P_DONT_WALK);
         signal_set_pedestrian(ctx, HEAD_PED_CROSSING, P_DONT_WALK, 0);
         ctx->ped_request_pending = 0;
         notify_status(ctx, 0, 0, 0);
@@ -62,5 +62,14 @@ int pedestrian_advance(lc_context_t *ctx)
 
     default:
         return 0;
+    }
+}
+
+int pedestrian_remaining_ms(lc_context_t *ctx)
+{
+    switch (ctx->step) {
+    case STEP_PED_WALK:      return ctx->countdown_ms + SCALE_S_MS(PED_CLEARANCE_S);
+    case STEP_PED_CLEARANCE: return ctx->countdown_ms;
+    default:                 return 0;
     }
 }

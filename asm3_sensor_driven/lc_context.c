@@ -5,6 +5,8 @@
 #include <time.h>
 #include "lc_context.h"
 #include "right_turn.h"
+#include "railway_protection.h"
+#include "pedestrian.h"
 
 static lc_context_t g_ctx;
 
@@ -37,6 +39,21 @@ void lc_enter_step(lc_context_t *ctx, lc_step_t step, int real_ms)
 {
     ctx->step         = step;
     ctx->countdown_ms = SCALE_MS(real_ms);
+
+    /* Publish the override-safety view, so Central_Command_Server_Task
+     * never has to read step/countdown_ms, which are written lock-free. */
+    lc_safety_view_t view;
+    view.rail_active  = railway_is_active(ctx);
+    view.ped_crossing = (step == STEP_PED_WALK || step == STEP_PED_CLEARANCE);
+    int busy_ms = view.rail_active  ? railway_remaining_ms(ctx)
+                : view.ped_crossing ? pedestrian_remaining_ms(ctx)
+                : 0;
+    view.busy_until_ms = lc_now_ms() + (uint64_t)busy_ms;
+
+    pthread_mutex_lock(&ctx->lock);
+    ctx->safety = view;
+    pthread_mutex_unlock(&ctx->lock);
+
     right_turn_on_step_change(ctx);
 }
 
@@ -104,6 +121,52 @@ control_mode_t lc_mode(lc_context_t *ctx)
     control_mode_t m = ctx->mode;
     pthread_mutex_unlock(&ctx->lock);
     return m;
+}
+
+/* --- reported signal states ---------------------------------------------- */
+void lc_set_vehicle_states(lc_context_t *ctx, vehicle_state_t ns, vehicle_state_t ew)
+{
+    pthread_mutex_lock(&ctx->lock);
+    ctx->ns_state = ns;
+    ctx->ew_state = ew;
+    pthread_mutex_unlock(&ctx->lock);
+}
+
+void lc_set_ped_state(lc_context_t *ctx, ped_state_t s)
+{
+    pthread_mutex_lock(&ctx->lock);
+    ctx->ped_state = s;
+    pthread_mutex_unlock(&ctx->lock);
+}
+
+void lc_set_gate_state(lc_context_t *ctx, gate_state_t s)
+{
+    pthread_mutex_lock(&ctx->lock);
+    ctx->gate_state = s;
+    pthread_mutex_unlock(&ctx->lock);
+}
+
+void lc_set_arrow_state(lc_context_t *ctx, arrow_state_t *slot, arrow_state_t s)
+{
+    pthread_mutex_lock(&ctx->lock);
+    *slot = s;
+    pthread_mutex_unlock(&ctx->lock);
+}
+
+/* --- override safety view ----------------------------------------------- */
+lc_safety_view_t lc_safety_view(lc_context_t *ctx)
+{
+    pthread_mutex_lock(&ctx->lock);
+    lc_safety_view_t v = ctx->safety;
+    pthread_mutex_unlock(&ctx->lock);
+    return v;
+}
+
+uint64_t lc_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000L);
 }
 
 /* --- faults ------------------------------------------------------------- */

@@ -100,7 +100,11 @@ STATUS_UPDATE has revealed its node.
 The LC validates every override twice, so `override` is not guaranteed to
 take effect. `Central_Command_Server_Task` replies `NET_RESULT_WAIT` with a
 reason and an estimated wait if railway protection is active or a
-pedestrian is mid-crossing. If either condition starts in the gap between
+pedestrian is mid-crossing. The wait covers the rest of the whole railway
+or pedestrian sequence, not just the current step. The CC's command worker
+resends after that wait (up to 4 attempts in total) in the background, so
+the operator console stays usable; a newer command of the same kind for the
+same intersection replaces a queued one. If either condition starts in the gap between
 acceptance and application, `apply_pending_cc_commands()` discards the
 command and prints `OVERRIDE_COMMAND ... DISCARDED`. MODE_SWITCH is always
 accepted; it changes sequencing policy, not the current signal state.

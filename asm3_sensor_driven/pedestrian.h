@@ -21,4 +21,8 @@ void pedestrian_begin_walk(lc_context_t *ctx);
 /* Handle the expiry of a pedestrian step. Returns 1 if handled. */
 int  pedestrian_advance(lc_context_t *ctx);
 
+/* Scaled ms until WALK + CLEARANCE ends, 0 when no crossing is running.
+ * Phase_Controller_Task only. */
+int  pedestrian_remaining_ms(lc_context_t *ctx);
+
 #endif /* PEDESTRIAN_H */

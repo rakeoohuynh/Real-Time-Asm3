@@ -41,4 +41,9 @@ void railway_on_gate_status(lc_context_t *ctx, int pulse_value);
 /* Is any step of the protection sequence currently running. */
 int  railway_is_active(lc_context_t *ctx);
 
+/* Scaled ms until the whole protection sequence should end: the current
+ * countdown plus the nominal length of every step still to come. 0 when
+ * protection is not active. Phase_Controller_Task only. */
+int  railway_remaining_ms(lc_context_t *ctx);
+
 #endif /* RAILWAY_PROTECTION_H */

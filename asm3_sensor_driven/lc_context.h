@@ -7,12 +7,16 @@
  * through this module's accessors rather than through file-scope
  * globals of its own. The single instance lives in lc_context.c.
  *
- * Locking rule (unchanged from the pre-split code): the mutex guards
- * only the fields that more than one thread touches -- mode, the coarse
- * phase, the signal states that Status_Reporting_Task snapshots, the
- * fault flags, and the pending CC command slots. Phase_Controller_Task
- * owns the fine-grained step and countdown outright and needs no lock
- * for them.
+ * Locking rule: the mutex guards only the fields that more than one
+ * thread touches -- mode, the coarse phase, the signal states that
+ * Status_Reporting_Task snapshots, the fault flags, the safety view, and
+ * the pending CC command slots. Phase_Controller_Task is the only writer
+ * of the reported fields; it writes them through the lc_set_* setters
+ * (which take the lock) and may read them back without it.
+ *
+ * Phase_Controller_Task owns the fine-grained step and countdown outright
+ * and needs no lock for them -- which is exactly why no other thread may
+ * read them. Other threads read the published lc_safety_view_t instead.
  * ===================================================================== */
 #ifndef LC_CONTEXT_H
 #define LC_CONTEXT_H
@@ -51,6 +55,15 @@ typedef enum {
 
 #define OVERRIDE_HOLD_S   20   /* PoC: how long a forced override state is held */
 
+/* What Central_Command_Server_Task needs to judge an override, published
+ * by lc_enter_step() under the lock on every step change. */
+typedef struct {
+    int      rail_active;     /* a railway protection step is running       */
+    int      ped_crossing;    /* a pedestrian WALK/CLEARANCE step is running */
+    uint64_t busy_until_ms;   /* lc_now_ms() estimate of when the whole
+                                 blocking sequence ends, not just this step */
+} lc_safety_view_t;
+
 typedef struct {
     int   id;
     char  cc_node[CC_NODE_MAXLEN];   /* "" = same node as LC */
@@ -83,6 +96,7 @@ typedef struct {
     rail_signal_t    rail_signal; /* crossing lights, road-facing */
     rail_signal_t    train_signal;/* train light, rail-facing     */
     uint32_t         fault_flags;
+    lc_safety_view_t safety;      /* guarded by lock, written by lc_enter_step() */
 
     /* right-turn arrow, one per approach (auxiliary movement) */
     arrow_state_t    ns_arrow, ew_arrow;
@@ -131,6 +145,20 @@ lc_phase_t  lc_phase(lc_context_t *ctx);
 /* --- mode -------------------------------------------------------------- */
 void           lc_set_mode(lc_context_t *ctx, control_mode_t mode);
 control_mode_t lc_mode(lc_context_t *ctx);
+
+/* --- reported signal states (Phase_Controller_Task writes, others read
+ * under lock). Setting both vehicle states in one call keeps the pair
+ * consistent in a status snapshot. ---------------------------------- */
+void        lc_set_vehicle_states(lc_context_t *ctx, vehicle_state_t ns, vehicle_state_t ew);
+void        lc_set_ped_state(lc_context_t *ctx, ped_state_t s);
+void        lc_set_gate_state(lc_context_t *ctx, gate_state_t s);
+void        lc_set_arrow_state(lc_context_t *ctx, arrow_state_t *slot, arrow_state_t s);
+
+/* --- override safety view (any thread) --------------------------------- */
+lc_safety_view_t lc_safety_view(lc_context_t *ctx);
+
+/* CLOCK_MONOTONIC in milliseconds. */
+uint64_t    lc_now_ms(void);
 
 /* --- faults ------------------------------------------------------------ */
 void        lc_raise_fault(lc_context_t *ctx, int fault_code);

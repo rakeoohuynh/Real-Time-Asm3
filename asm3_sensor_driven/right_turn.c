@@ -32,7 +32,7 @@ static void arrow_refs(lc_context_t *ctx, arrow_ref_t out[2])
 
 static void arrow_start(lc_context_t *ctx, arrow_ref_t *a)
 {
-    *a->state        = ARROW_GREEN;
+    lc_set_arrow_state(ctx, a->state, ARROW_GREEN);
     *a->remaining_ms = SCALE_S_MS(RIGHT_TURN_ARROW_S);
     signal_set_right_turn_arrow(ctx, a->head_id, ARROW_GREEN, RIGHT_TURN_ARROW_S);
     printf("[I%d][Right_Turn_Task] %s arrow GREEN for %ds (main signal stays %s)\n",
@@ -44,7 +44,7 @@ static void arrow_start(lc_context_t *ctx, arrow_ref_t *a)
 static void arrow_stop(lc_context_t *ctx, arrow_ref_t *a, const char *reason)
 {
     if (*a->state == ARROW_OFF) return;
-    *a->state        = ARROW_OFF;
+    lc_set_arrow_state(ctx, a->state, ARROW_OFF);
     *a->remaining_ms = 0;
     signal_set_right_turn_arrow(ctx, a->head_id, ARROW_OFF, 0);
     printf("[I%d][Right_Turn_Task] %s arrow OFF (%s)\n", ctx->id, a->label, reason);
@@ -56,7 +56,7 @@ void right_turn_init(lc_context_t *ctx)
     arrow_ref_t a[2];
     arrow_refs(ctx, a);
     for (int i = 0; i < 2; i++) {
-        *a[i].state        = ARROW_OFF;
+        lc_set_arrow_state(ctx, a[i].state, ARROW_OFF);
         *a[i].remaining_ms = 0;
         signal_set_right_turn_arrow(ctx, a[i].head_id, ARROW_OFF, 0);
     }

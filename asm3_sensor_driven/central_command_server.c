@@ -10,6 +10,13 @@
 #include "fixed_timing.h"
 #include "railway_protection.h"
 
+/* Whole seconds until `until_ms`, rounded up, never negative. */
+static int seconds_until(uint64_t until_ms)
+{
+    uint64_t now = lc_now_ms();
+    return (until_ms > now) ? (int)((until_ms - now + 999) / 1000) : 0;
+}
+
 void *central_command_server_task(void *arg)
 {
     lc_context_t *ctx = arg;
@@ -21,35 +28,39 @@ void *central_command_server_task(void *arg)
         net_reply_t reply;
         memset(&reply, 0, sizeof(reply));
 
-        pthread_mutex_lock(&ctx->lock);
-        int mid_crossing = (ctx->step == STEP_PED_WALK || ctx->step == STEP_PED_CLEARANCE);
-        int rail_active  = railway_is_active(ctx);
-
         if (cmd.type == NET_OVERRIDE_COMMAND) {
-            if (rail_active) {
+            /* Judge the override from the published safety view only: the
+             * step and countdown belong to Phase_Controller_Task. The wait
+             * covers the rest of the blocking sequence, plus 1s so the
+             * CC's resend lands after it has ended, not just this step. */
+            lc_safety_view_t view = lc_safety_view(ctx);
+            if (view.rail_active) {
                 reply.result = NET_RESULT_WAIT;
-                reply.wait_seconds = (ctx->countdown_ms / 1000) + 1;
+                reply.wait_seconds = seconds_until(view.busy_until_ms) + 1;
                 snprintf(reply.reason, sizeof(reply.reason), "Railway protection active, wait for clearance");
-            } else if (mid_crossing) {
+            } else if (view.ped_crossing) {
                 reply.result = NET_RESULT_WAIT;
-                reply.wait_seconds = (ctx->countdown_ms / 1000) + 1;
+                reply.wait_seconds = seconds_until(view.busy_until_ms) + 1;
                 snprintf(reply.reason, sizeof(reply.reason),
                          "Pedestrian is crossing the road, wait for %d s", reply.wait_seconds);
             } else {
                 reply.result = NET_RESULT_ACCEPTED;
+                pthread_mutex_lock(&ctx->lock);
                 ctx->override_command  = cmd.command_type;
                 ctx->override_seq      = cmd.sequence_no;
                 ctx->override_pending  = 1;
+                pthread_mutex_unlock(&ctx->lock);
             }
         } else if (cmd.type == NET_MODE_SWITCH) {
             reply.result = NET_RESULT_ACCEPTED;
+            pthread_mutex_lock(&ctx->lock);
             ctx->mode_switch_requested = cmd.requested_mode;
             ctx->mode_switch_pending   = 1;
+            pthread_mutex_unlock(&ctx->lock);
         } else {
             reply.result = NET_RESULT_INVALID;
             snprintf(reply.reason, sizeof(reply.reason), "unknown command type");
         }
-        pthread_mutex_unlock(&ctx->lock);
 
         printf("[I%d][Central_Command_Server_Task] cmd type=%d -> result=%d (%s)\n",
                ctx->id, cmd.type, reply.result, reply.reason);
@@ -77,7 +88,7 @@ void apply_pending_cc_commands(lc_context_t *ctx)
     if (has_mode) {
         printf("[I%d][Phase_Controller_Task] MODE_SWITCH applied: mode=%d\n", ctx->id, new_mode);
         fflush(stdout);
-        ctx->mode = new_mode;
+        lc_set_mode(ctx, new_mode);
     }
 
     if (!has_override) return;
@@ -106,7 +117,7 @@ void apply_pending_cc_commands(lc_context_t *ctx)
     case OVR_FORCE_ALL_RED:
         signal_set_vehicle(ctx, HEAD_NS_VEHICLE, V_RED, OVERRIDE_HOLD_S);
         signal_set_vehicle(ctx, HEAD_EW_VEHICLE, V_RED, OVERRIDE_HOLD_S);
-        ctx->ns_state = ctx->ew_state = V_RED;
+        lc_set_vehicle_states(ctx, V_RED, V_RED);
         lc_enter_step_seconds(ctx, STEP_OVERRIDE_HOLD, OVERRIDE_HOLD_S);
         break;
 

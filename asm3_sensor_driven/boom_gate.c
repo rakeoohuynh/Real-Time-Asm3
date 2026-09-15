@@ -93,7 +93,7 @@ static void gate_command(lc_context_t *ctx, int command, int timeout_s)
         /* The gate task is unreachable: synthesise the fault locally so
          * the sequence still reaches its fault branch. */
         lc_raise_fault(ctx, FAULT_BOOM_GATE);
-        ctx->gate_state = GATE_TIMEOUT_FAULT;
+        lc_set_gate_state(ctx, GATE_TIMEOUT_FAULT);
         printf("[I%d][Boom_Gate_Controller_Task] gate command unreachable (errno path)\n", ctx->id);
         fflush(stdout);
     }
@@ -102,14 +102,14 @@ static void gate_command(lc_context_t *ctx, int command, int timeout_s)
 void boom_gate_begin_close(lc_context_t *ctx)
 {
     g_close_attempts = 1;
-    ctx->gate_state = GATE_LOWERING;
+    lc_set_gate_state(ctx, GATE_LOWERING);
     gate_command(ctx, 1 /*CLOSE*/, GATE_MOVE_TIMEOUT_S);
 }
 
 void boom_gate_retry_close(lc_context_t *ctx)
 {
     g_close_attempts++;
-    ctx->gate_state = GATE_LOWERING;
+    lc_set_gate_state(ctx, GATE_LOWERING);
     printf("[I%d][Boom_Gate_Controller_Task] retrying CLOSE (attempt %d of %d)\n",
            ctx->id, g_close_attempts, GATE_CLOSE_MAX_ATTEMPTS);
     fflush(stdout);
@@ -118,7 +118,7 @@ void boom_gate_retry_close(lc_context_t *ctx)
 
 void boom_gate_begin_open(lc_context_t *ctx)
 {
-    ctx->gate_state = GATE_RAISING;
+    lc_set_gate_state(ctx, GATE_RAISING);
     gate_command(ctx, 0 /*OPEN*/, GATE_MOVE_TIMEOUT_S);
 }
 
@@ -128,18 +128,18 @@ gate_event_t boom_gate_on_status(lc_context_t *ctx, int pulse_value)
     int closing = GATE_PULSE_CLOSING(pulse_value);
 
     if (!closing) {
-        ctx->gate_state = (result == 0) ? GATE_OPEN : GATE_TIMEOUT_FAULT;
+        lc_set_gate_state(ctx, (result == 0) ? GATE_OPEN : GATE_TIMEOUT_FAULT);
         return GATE_EVT_OPENED;
     }
 
     if (result == 0) {
-        ctx->gate_state = GATE_LOCKED;
+        lc_set_gate_state(ctx, GATE_LOCKED);
         lc_clear_fault(ctx, FAULT_BOOM_GATE);
         g_close_attempts = 0;
         return GATE_EVT_LOCKED;
     }
 
-    ctx->gate_state = GATE_TIMEOUT_FAULT;
+    lc_set_gate_state(ctx, GATE_TIMEOUT_FAULT);
     lc_raise_fault(ctx, FAULT_BOOM_GATE);
     return (g_close_attempts < GATE_CLOSE_MAX_ATTEMPTS)
                ? GATE_EVT_CLOSE_RETRY

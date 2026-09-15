@@ -9,7 +9,7 @@
 
 void fixed_timing_begin_ns_green(lc_context_t *ctx)
 {
-    ctx->ns_state = V_GREEN; ctx->ew_state = V_RED;
+    lc_set_vehicle_states(ctx, V_GREEN, V_RED);
     signal_set_vehicle(ctx, HEAD_NS_VEHICLE, V_GREEN, VEHICLE_GREEN_S);
     signal_set_vehicle(ctx, HEAD_EW_VEHICLE, V_RED,   VEHICLE_GREEN_S);
     ctx->min_green_elapsed = 0;
@@ -19,7 +19,7 @@ void fixed_timing_begin_ns_green(lc_context_t *ctx)
 
 void fixed_timing_begin_ew_green(lc_context_t *ctx)
 {
-    ctx->ew_state = V_GREEN; ctx->ns_state = V_RED;
+    lc_set_vehicle_states(ctx, V_RED, V_GREEN);
     signal_set_vehicle(ctx, HEAD_EW_VEHICLE, V_GREEN, VEHICLE_GREEN_S);
     signal_set_vehicle(ctx, HEAD_NS_VEHICLE, V_RED,   VEHICLE_GREEN_S);
     ctx->min_green_elapsed = 0;
@@ -33,14 +33,14 @@ int fixed_timing_advance(lc_context_t *ctx)
 
     case STEP_NS_GREEN:
         signal_set_vehicle(ctx, HEAD_NS_VEHICLE, V_YELLOW, VEHICLE_YELLOW_S);
-        ctx->ns_state = V_YELLOW;
+        lc_set_vehicle_states(ctx, V_YELLOW, ctx->ew_state);
         lc_enter_step_seconds(ctx, STEP_NS_YELLOW, VEHICLE_YELLOW_S);
         notify_status(ctx, 0, 0, 0);
         return 1;
 
     case STEP_NS_YELLOW:
         signal_set_vehicle(ctx, HEAD_NS_VEHICLE, V_RED, VEHICLE_ALL_RED_S);
-        ctx->ns_state = V_RED;
+        lc_set_vehicle_states(ctx, V_RED, ctx->ew_state);
         lc_enter_step_seconds(ctx, STEP_NS_ALLRED, VEHICLE_ALL_RED_S);
         return 1;
 
@@ -55,14 +55,14 @@ int fixed_timing_advance(lc_context_t *ctx)
 
     case STEP_EW_GREEN:
         signal_set_vehicle(ctx, HEAD_EW_VEHICLE, V_YELLOW, VEHICLE_YELLOW_S);
-        ctx->ew_state = V_YELLOW;
+        lc_set_vehicle_states(ctx, ctx->ns_state, V_YELLOW);
         lc_enter_step_seconds(ctx, STEP_EW_YELLOW, VEHICLE_YELLOW_S);
         notify_status(ctx, 0, 0, 0);
         return 1;
 
     case STEP_EW_YELLOW:
         signal_set_vehicle(ctx, HEAD_EW_VEHICLE, V_RED, VEHICLE_ALL_RED_S);
-        ctx->ew_state = V_RED;
+        lc_set_vehicle_states(ctx, ctx->ns_state, V_RED);
         lc_enter_step_seconds(ctx, STEP_EW_ALLRED, VEHICLE_ALL_RED_S);
         return 1;
 

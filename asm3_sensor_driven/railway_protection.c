@@ -90,6 +90,37 @@ int railway_is_active(lc_context_t *ctx)
     return (ctx->step >= STEP_RAIL_YELLOW && ctx->step <= STEP_RAIL_GATE_RAISE);
 }
 
+/* The nominal sequence, in order, with the countdown each step is entered
+ * with in railway_advance(). STEP_RAIL_GATE_FAULT is not part of the
+ * nominal path and is handled separately below. */
+static const struct { lc_step_t step; int real_s; } k_rail_sequence[] = {
+    { STEP_RAIL_YELLOW,     VEHICLE_YELLOW_S        },
+    { STEP_RAIL_ALLRED,     VEHICLE_ALL_RED_S       },
+    { STEP_RAIL_PREARRIVAL, RAIL_PREARRIVAL_QUIET_S },
+    { STEP_RAIL_WARN,       RAIL_WARNING_LEAD_S     },
+    { STEP_RAIL_GATE_LOWER, RAIL_GATE_LOWER_S       },
+    { STEP_RAIL_OCCUPIED,   RAIL_TRAIN_OCCUPY_S     },
+    { STEP_RAIL_POST_HOLD,  RAIL_POST_TRAIN_HOLD_S  },
+    { STEP_RAIL_GATE_RAISE, RAIL_GATE_LOWER_S       },
+};
+
+int railway_remaining_ms(lc_context_t *ctx)
+{
+    if (!railway_is_active(ctx)) return 0;
+
+    /* A gate-fault retry is followed by a fresh lowering, so count the
+     * rest of the sequence as if the warning flash had just ended. */
+    lc_step_t after = (ctx->step == STEP_RAIL_GATE_FAULT) ? STEP_RAIL_WARN : ctx->step;
+
+    int total = ctx->countdown_ms;
+    int found = 0;
+    for (size_t i = 0; i < sizeof(k_rail_sequence) / sizeof(k_rail_sequence[0]); i++) {
+        if (found) total += SCALE_S_MS(k_rail_sequence[i].real_s);
+        else if (k_rail_sequence[i].step == after) found = 1;
+    }
+    return total;
+}
+
 /* ==========================================================
  * The sequence
  * ========================================================== */
@@ -105,7 +136,7 @@ void railway_begin_protection(lc_context_t *ctx)
      * even for one tick. */
     right_turn_force_off(ctx, "railway protection");
 
-    ctx->ns_state = ctx->ew_state = V_YELLOW;
+    lc_set_vehicle_states(ctx, V_YELLOW, V_YELLOW);
     signal_set_vehicle(ctx, HEAD_NS_VEHICLE, V_YELLOW, VEHICLE_YELLOW_S);
     signal_set_vehicle(ctx, HEAD_EW_VEHICLE, V_YELLOW, VEHICLE_YELLOW_S);
 
@@ -147,7 +178,7 @@ int railway_advance(lc_context_t *ctx)
     switch (ctx->step) {
 
     case STEP_RAIL_YELLOW:
-        ctx->ns_state = ctx->ew_state = V_RED;
+        lc_set_vehicle_states(ctx, V_RED, V_RED);
         signal_set_vehicle(ctx, HEAD_NS_VEHICLE, V_RED, VEHICLE_ALL_RED_S);
         signal_set_vehicle(ctx, HEAD_EW_VEHICLE, V_RED, VEHICLE_ALL_RED_S);
         lc_enter_step_seconds(ctx, STEP_RAIL_ALLRED, VEHICLE_ALL_RED_S);

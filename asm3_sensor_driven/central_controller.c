@@ -16,6 +16,9 @@
  *       multiple parallel status instead of serialized status")
  *   Display/Logging            -> display_task()     (thread)
  *   Operator console           -> operator_console_task() (main thread)
+ *   Command delivery           -> command_worker()   (thread) -- sends
+ *       queued OVERRIDE_COMMAND/MODE_SWITCH and waits out NET_RESULT_WAIT
+ *       retries, so the operator console never blocks on an LC
  *
  * LC discovery: the CC does not need to be told where each LC lives.
  * The first STATUS_UPDATE/FAULT_ALARM received from an intersection
@@ -214,21 +217,155 @@ static void *display_task(void *arg)
 
 /* =========================================================================
  * Operator-driven commands (UC-03 MODE_SWITCH, UC-07 OVERRIDE_COMMAND)
+ *
+ * The console only queues a command. command_worker() delivers it with a
+ * bounded MsgSend and, on NET_RESULT_WAIT, re-queues it for after the
+ * wait the LC asked for -- so the console stays usable meanwhile, and a
+ * hung LC or dead QNET link cannot freeze it.
  * ========================================================================= */
-static int connection_for(lc_record_t *rec)
+#define CMD_QUEUE_LEN         8
+#define CMD_MAX_ATTEMPTS      4      /* initial send + 3 resends after WAIT */
+#define CMD_SEND_TIMEOUT_MS   2000   /* bound on send + reply to one LC     */
+
+typedef struct {
+    int           in_use;
+    net_command_t cmd;
+    int           attempts;
+    uint64_t      not_before_ms;     /* now_ms() before which it is not sent */
+} pending_cmd_t;
+
+static pending_cmd_t   g_cmdq[CMD_QUEUE_LEN];
+static pthread_mutex_t g_cmdq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_cmdq_cond;  /* CLOCK_MONOTONIC, initialised in main() */
+
+static uint64_t now_ms(void)
 {
-    if (rec->override_coid >= 0) return rec->override_coid;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000L);
+}
+
+static const char *cmd_label(const net_command_t *cmd)
+{
+    return (cmd->type == NET_OVERRIDE_COMMAND) ? "OVERRIDE_COMMAND" : "MODE_SWITCH";
+}
+
+/* Caller holds g_cmdq_lock. A queued command of the same type for the
+ * same intersection, so a newer one can replace it. */
+static pending_cmd_t *find_queued_locked(const net_command_t *cmd)
+{
+    for (int i = 0; i < CMD_QUEUE_LEN; i++)
+        if (g_cmdq[i].in_use && g_cmdq[i].cmd.type == cmd->type &&
+            g_cmdq[i].cmd.intersection_id == cmd->intersection_id)
+            return &g_cmdq[i];
+    return NULL;
+}
+
+static void enqueue_command(const net_command_t *cmd)
+{
+    pthread_mutex_lock(&g_cmdq_lock);
+    pending_cmd_t *slot = find_queued_locked(cmd);
+    if (slot) {
+        printf("[CC][Operator_Console] %s seq=%u for I%d superseded by seq=%u\n",
+               cmd_label(cmd), slot->cmd.sequence_no, cmd->intersection_id, cmd->sequence_no);
+    } else {
+        for (int i = 0; i < CMD_QUEUE_LEN && !slot; i++)
+            if (!g_cmdq[i].in_use) slot = &g_cmdq[i];
+    }
+    if (slot) {
+        slot->in_use        = 1;
+        slot->cmd           = *cmd;
+        slot->attempts      = 0;
+        slot->not_before_ms = 0;
+        pthread_cond_signal(&g_cmdq_cond);
+    } else {
+        printf("[CC][Operator_Console] command queue full, %s to I%d dropped\n",
+               cmd_label(cmd), cmd->intersection_id);
+    }
+    pthread_mutex_unlock(&g_cmdq_lock);
+}
+
+/* Put a command back for a later resend, unless the operator has queued
+ * a newer one of the same kind meanwhile -- the newer one wins. */
+static void requeue_command(const pending_cmd_t *job)
+{
+    pthread_mutex_lock(&g_cmdq_lock);
+    pending_cmd_t *slot = find_queued_locked(&job->cmd);
+    if (slot) {
+        printf("[CC][Command_Worker] I%d: newer %s already queued, not resending seq=%u\n",
+               job->cmd.intersection_id, cmd_label(&job->cmd), job->cmd.sequence_no);
+        slot = NULL;
+    } else {
+        for (int i = 0; i < CMD_QUEUE_LEN && !slot; i++)
+            if (!g_cmdq[i].in_use) slot = &g_cmdq[i];
+        if (slot) {
+            *slot = *job;
+            slot->in_use = 1;
+            pthread_cond_signal(&g_cmdq_cond);
+        } else {
+            printf("[CC][Command_Worker] command queue full, resend of %s to I%d dropped\n",
+                   cmd_label(&job->cmd), job->cmd.intersection_id);
+        }
+    }
+    pthread_mutex_unlock(&g_cmdq_lock);
+}
+
+/* Block until a queued command is due, then remove and return it. */
+static pending_cmd_t dequeue_due_command(void)
+{
+    pthread_mutex_lock(&g_cmdq_lock);
+    for (;;) {
+        pending_cmd_t *next = NULL;
+        for (int i = 0; i < CMD_QUEUE_LEN; i++)
+            if (g_cmdq[i].in_use && (!next || g_cmdq[i].not_before_ms < next->not_before_ms))
+                next = &g_cmdq[i];
+
+        if (!next) {
+            pthread_cond_wait(&g_cmdq_cond, &g_cmdq_lock);
+            continue;
+        }
+        uint64_t now = now_ms();
+        if (next->not_before_ms <= now) {
+            pending_cmd_t job = *next;
+            next->in_use = 0;
+            pthread_mutex_unlock(&g_cmdq_lock);
+            return job;
+        }
+        struct timespec until;
+        clock_gettime(CLOCK_MONOTONIC, &until);
+        uint64_t wait_ms = next->not_before_ms - now;
+        until.tv_sec  += (time_t)(wait_ms / 1000);
+        until.tv_nsec += (long)(wait_ms % 1000) * 1000000L;
+        if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&g_cmdq_cond, &g_cmdq_lock, &until);
+    }
+}
+
+/* Cached command connection to an LC, opening it if needed. name_open()
+ * can take a while over QNET, so it runs without g_lc_lock held; only
+ * command_worker() opens or drops these connections. */
+static int connection_for(int id)
+{
+    pthread_mutex_lock(&g_lc_lock);
+    lc_record_t *rec = find_or_create(id);
+    if (!rec) { pthread_mutex_unlock(&g_lc_lock); return -1; }
+    int     coid      = rec->override_coid;
+    int     link_seen = rec->link_seen;
+    int32_t node_desc = rec->node_desc;
+    pthread_mutex_unlock(&g_lc_lock);
+
+    if (coid >= 0) return coid;
 
     char chan_name[32], path[160];
-    lc_channel_name(chan_name, sizeof(chan_name), rec->id);
+    lc_channel_name(chan_name, sizeof(chan_name), id);
 
     /* NOTE: ND2S_LOCAL_STR / netmgr_ndtostr() signature can vary slightly
      * between QNX SDP header revisions -- check <sys/netmgr.h> on the
      * target toolchain (SDP 7.1 per project notes) and adjust the flag
      * name below if it does not match. */
-    if (rec->link_seen && rec->node_desc != 0 && rec->node_desc != ND_LOCAL_NODE) {
+    if (link_seen && node_desc != 0 && node_desc != ND_LOCAL_NODE) {
         char nodestr[64];
-        if (netmgr_ndtostr(ND2S_LOCAL_STR, rec->node_desc, nodestr, sizeof(nodestr)) > 0)
+        if (netmgr_ndtostr(ND2S_LOCAL_STR, node_desc, nodestr, sizeof(nodestr)) > 0)
             snprintf(path, sizeof(path), "/net/%s/dev/name/local/%s", nodestr, chan_name);
         else
             snprintf(path, sizeof(path), "/dev/name/local/%s", chan_name);
@@ -236,42 +373,80 @@ static int connection_for(lc_record_t *rec)
         snprintf(path, sizeof(path), "/dev/name/local/%s", chan_name);
     }
 
-    rec->override_coid = name_open(path, 0);
-    return rec->override_coid;
+    coid = name_open(path, 0);
+    if (coid >= 0) {
+        pthread_mutex_lock(&g_lc_lock);
+        rec->override_coid = coid;   /* rec is a stable slot in g_lc[] */
+        pthread_mutex_unlock(&g_lc_lock);
+    }
+    return coid;
 }
 
-/* Sends the command, and follows the UC-07 "reject with wait=N -> CC
- * delays -> resend" flow exactly once (a real operator console would
- * loop/retry further; one retry is enough to demonstrate the protocol). */
-static void send_command_with_retry(lc_record_t *rec, net_command_t *cmd)
+static void drop_connection(int id, int coid)
 {
-    for (int attempt = 0; attempt < 2; attempt++) {
-        int coid = connection_for(rec);
-        if (coid < 0) {
-            printf("[CC][Operator_Console] cannot reach I%d (link not established)\n", rec->id);
-            return;
-        }
-        net_reply_t reply;
-        int rc = MsgSend(coid, cmd, sizeof(*cmd), &reply, sizeof(reply));
-        if (rc == -1) {
-            printf("[CC][Operator_Console] send to I%d failed (errno=%d) -- link may be down\n", rec->id, errno);
-            rec->override_coid = -1; /* force reconnect next time */
-            return;
-        }
-        if (reply.result == NET_RESULT_ACCEPTED) {
-            printf("[CC][Operator_Console] I%d ACCEPTED command\n", rec->id);
-            return;
-        } else if (reply.result == NET_RESULT_WAIT) {
-            printf("[CC][Operator_Console] I%d rejected: %s -- waiting %ds then resending (UC-07)\n",
-                   rec->id, reply.reason, reply.wait_seconds);
-            sleep(reply.wait_seconds);
-            continue; /* resend once */
-        } else {
-            printf("[CC][Operator_Console] I%d rejected (invalid): %s\n", rec->id, reply.reason);
-            return;
-        }
+    pthread_mutex_lock(&g_lc_lock);
+    lc_record_t *rec = find_or_create(id);
+    if (rec && rec->override_coid == coid) rec->override_coid = -1;
+    pthread_mutex_unlock(&g_lc_lock);
+    name_close(coid);
+}
+
+/* One delivery attempt, following UC-07 "reject with wait=N -> CC delays
+ * -> resend" for up to CMD_MAX_ATTEMPTS sends. */
+static void deliver_command(pending_cmd_t *job)
+{
+    int id = job->cmd.intersection_id;
+    int coid = connection_for(id);
+    if (coid < 0) {
+        printf("[CC][Command_Worker] cannot reach I%d (link not established)\n", id);
+        fflush(stdout);
+        return;
     }
-    printf("[CC][Operator_Console] I%d still not accepted after retry, giving up for now\n", rec->id);
+
+    net_reply_t reply;
+    memset(&reply, 0, sizeof(reply));
+    job->attempts++;
+
+    /* Bound both the send and the wait for the reply. A timeout while
+     * REPLY-blocked means the LC may still have acted on the command. */
+    uint64_t ns = (uint64_t)CMD_SEND_TIMEOUT_MS * 1000000ULL;
+    TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY, NULL, &ns, NULL);
+    if (MsgSend(coid, &job->cmd, sizeof(job->cmd), &reply, sizeof(reply)) == -1) {
+        int err = errno;
+        printf("[CC][Command_Worker] send of %s to I%d failed (errno=%d%s) -- link may be down\n",
+               cmd_label(&job->cmd), id, err,
+               (err == ETIMEDOUT) ? ": no reply in time, outcome unknown" : "");
+        fflush(stdout);
+        drop_connection(id, coid);   /* force a fresh connection next time */
+        return;
+    }
+
+    if (reply.result == NET_RESULT_ACCEPTED) {
+        printf("[CC][Command_Worker] I%d ACCEPTED %s seq=%u\n", id, cmd_label(&job->cmd), job->cmd.sequence_no);
+    } else if (reply.result == NET_RESULT_WAIT) {
+        if (job->attempts >= CMD_MAX_ATTEMPTS) {
+            printf("[CC][Command_Worker] I%d rejected: %s -- still not accepted after %d attempts, giving up\n",
+                   id, reply.reason, job->attempts);
+        } else {
+            printf("[CC][Command_Worker] I%d rejected: %s -- resending in %ds (attempt %d/%d, UC-07)\n",
+                   id, reply.reason, reply.wait_seconds, job->attempts, CMD_MAX_ATTEMPTS);
+            job->not_before_ms = now_ms() + (uint64_t)reply.wait_seconds * 1000u;
+            requeue_command(job);
+        }
+    } else {
+        printf("[CC][Command_Worker] I%d rejected (invalid): %s\n", id, reply.reason);
+    }
+    fflush(stdout);
+}
+
+static void *command_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        pending_cmd_t job = dequeue_due_command();
+        deliver_command(&job);
+    }
+    return NULL;
 }
 
 static void do_override(int id, const char *cmd_name)
@@ -295,8 +470,8 @@ static void do_override(int id, const char *cmd_name)
     cmd.command_type = cmd_type;
     cmd.sequence_no = g_seq_no++;
 
-    printf("[CC][Operator_Console] sending OVERRIDE_COMMAND(%s) to I%d (seq=%u)\n", cmd_name, id, cmd.sequence_no);
-    send_command_with_retry(rec, &cmd);
+    printf("[CC][Operator_Console] queued OVERRIDE_COMMAND(%s) to I%d (seq=%u)\n", cmd_name, id, cmd.sequence_no);
+    enqueue_command(&cmd);
 }
 
 static void do_mode_switch(int id, const char *mode_name)
@@ -318,8 +493,8 @@ static void do_mode_switch(int id, const char *mode_name)
     cmd.requested_mode = mode;
     cmd.sequence_no = g_seq_no++;
 
-    printf("[CC][Operator_Console] sending MODE_SWITCH(%s) to I%d (seq=%u)\n", mode_name, id, cmd.sequence_no);
-    send_command_with_retry(rec, &cmd);
+    printf("[CC][Operator_Console] queued MODE_SWITCH(%s) to I%d (seq=%u)\n", mode_name, id, cmd.sequence_no);
+    enqueue_command(&cmd);
 }
 
 static void print_status_table(void)
@@ -376,6 +551,14 @@ int main(void)
         pthread_detach(th);
     }
     pthread_create(&th, NULL, display_task, NULL);
+    pthread_detach(th);
+
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&g_cmdq_cond, &ca);
+    pthread_condattr_destroy(&ca);
+    pthread_create(&th, NULL, command_worker, NULL);
     pthread_detach(th);
 
     operator_console_task();  /* runs on main thread until "quit" */
