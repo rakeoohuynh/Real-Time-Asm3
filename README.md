@@ -75,10 +75,27 @@ The CC prints its command list on startup. One command per line on stdin:
 
 | Command | Effect |
 |---|---|
-| `status` | Print the tracked-intersection table: current phase, NS/EW vehicle state and right-turn arrow, pedestrian state, boom gate state, control mode, fault flags |
+| `status` | Print the dashboard now (it is also printed every 10 s) |
 | `override <id> <type>` | Send an OVERRIDE_COMMAND to intersection `<id>` |
 | `mode <id> <fixed\|sensor>` | Send a MODE_SWITCH to intersection `<id>` |
+| `verbose <on\|off>` | `on`: log every STATUS_UPDATE. `off` (default): log only first contact and changes of phase, mode or faults |
 | `quit` | Leave the operator console |
+
+The dashboard has one row per intersection:
+
+```
+======================== CC DASHBOARD 14:03:22 ========================
+ID   PHASE         NS           EW           PED        GATE      MODE    LINK       FAULTS
+I1   NS            GREEN+ARROW  RED          DONT_WALK  OPEN      SENSOR  OK 2s      none
+I2   RAIL_PROTECT  RED          RED          DONT_WALK  FAULT     FIXED   STALE 31s  BOOM_GATE
+```
+
+`+ARROW` means that approach's right-turn arrow is green. `LINK` is the
+time since that LC's last report, measured on the CC's clock. It turns
+`STALE` after `2 x VEHICLE_GREEN_S / TIME_SCALE_FACTOR + 5` seconds
+(23 s at the default factor of 5), since an LC reports only when its
+state changes. A `FAULT_ALARM` is always logged, whatever the verbose
+setting.
 
 `<id>` is the number passed to the LC's `-i` flag. The four override types:
 
@@ -112,7 +129,7 @@ accepted; it changes sequencing policy, not the current signal state.
 ## Local Controller -- flags and keys
 
 ```
-./local_controller -i <id> [-c <cc_node>] [-T HH:MM] [-N]
+./local_controller -i <id> [-c <cc_node>] [-T HH:MM] [-N] [-v]
 ```
 
 | Flag | Meaning |
@@ -121,6 +138,23 @@ accepted; it changes sequencing policy, not the current signal state.
 | `-c <node>` | QNET node the CC runs on. Omit for same-node testing |
 | `-T HH:MM` | Seed the simulated clock, e.g. `-T 06:28` to start just before a morning peak train |
 | `-N` | Do not run the train timetable; trains then arrive only via the `t` key |
+| `-v` | Verbose: also log every signal-head, railway-signal, right-turn-arrow and boom-gate command |
+
+Whenever the step, a signal head, the gate, the mode or the faults
+change, the LC prints one status line:
+
+```
+[I1 06:28:15] NS_GREEN         45s  NS:GREEN+ARROW EW:RED         PED:DONT_WALK GATE:OPEN     FIXED
+[I1 06:29:02] RAIL_WARN        15s  NS:RED         EW:RED         PED:DONT_WALK GATE:OPEN     FIXED
+```
+
+The time is the VM's wall clock, the same clock the CC stamps its log
+with, so the LC and CC consoles line up. The number after the step is
+the real-world seconds left in it. The train timetable (`-T`) still runs
+on its own accelerated clock (A40). `FAULT:<names>` is appended
+when a fault is active. Events such as railway protection, pedestrian
+requests, CC commands and gate faults are still logged on their own
+lines. Only the per-head output lines need `-v`.
 
 The LC prints its key list on startup. Each key is one line on stdin:
 

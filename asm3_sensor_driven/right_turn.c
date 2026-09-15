@@ -35,10 +35,12 @@ static void arrow_start(lc_context_t *ctx, arrow_ref_t *a)
     lc_set_arrow_state(ctx, a->state, ARROW_GREEN);
     *a->remaining_ms = SCALE_S_MS(RIGHT_TURN_ARROW_S);
     signal_set_right_turn_arrow(ctx, a->head_id, ARROW_GREEN, RIGHT_TURN_ARROW_S);
-    printf("[I%d][Right_Turn_Task] %s arrow GREEN for %ds (main signal stays %s)\n",
-           ctx->id, a->label, RIGHT_TURN_ARROW_S,
-           lc_vehicle_name(a->movement == MOVE_NS_RIGHT ? ctx->ns_state : ctx->ew_state));
-    fflush(stdout);
+    if (ctx->verbose) {
+        printf("[I%d][Right_Turn_Task] %s arrow GREEN for %ds (main signal stays %s)\n",
+               ctx->id, a->label, RIGHT_TURN_ARROW_S,
+               lc_vehicle_name(a->movement == MOVE_NS_RIGHT ? ctx->ns_state : ctx->ew_state));
+        fflush(stdout);
+    }
 }
 
 static void arrow_stop(lc_context_t *ctx, arrow_ref_t *a, const char *reason)
@@ -47,8 +49,10 @@ static void arrow_stop(lc_context_t *ctx, arrow_ref_t *a, const char *reason)
     lc_set_arrow_state(ctx, a->state, ARROW_OFF);
     *a->remaining_ms = 0;
     signal_set_right_turn_arrow(ctx, a->head_id, ARROW_OFF, 0);
-    printf("[I%d][Right_Turn_Task] %s arrow OFF (%s)\n", ctx->id, a->label, reason);
-    fflush(stdout);
+    if (ctx->verbose) {
+        printf("[I%d][Right_Turn_Task] %s arrow OFF (%s)\n", ctx->id, a->label, reason);
+        fflush(stdout);
+    }
 }
 
 void right_turn_init(lc_context_t *ctx)

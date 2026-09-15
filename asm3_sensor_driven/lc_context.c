@@ -209,6 +209,20 @@ const char *lc_arrow_name(arrow_state_t s)
 {
     return (s == ARROW_GREEN) ? "GREEN_ARROW" : "OFF";
 }
+const char *lc_gate_name(gate_state_t s)
+{
+    switch (s) {
+    case GATE_OPEN:     return "OPEN";
+    case GATE_LOWERING: return "LOWERING";
+    case GATE_LOCKED:   return "LOCKED";
+    case GATE_RAISING:  return "RAISING";
+    default:            return "FAULT";
+    }
+}
+const char *lc_mode_name(control_mode_t m)
+{
+    switch (m) { case MODE_FIXED_TIMING: return "FIXED"; case MODE_SENSOR_DRIVEN: return "SENSOR"; default: return "ADVANCED"; }
+}
 
 /* --- scaled sleep ------------------------------------------------------- */
 void lc_delay_real_ms(int real_ms)

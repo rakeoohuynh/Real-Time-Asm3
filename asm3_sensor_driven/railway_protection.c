@@ -30,12 +30,14 @@ void *railway_signal_task(void *arg)
 
         local_reply_t reply = { .result = 0, .elapsed_ms = 0 };
         if (msg.type == MSG_SET_RAILWAY_SIGNAL) {
-            const char *which = (msg.body.set_rail.signal_id == RAIL_SIGNAL_TRAIN)
-                                    ? "train light" : "crossing lights";
-            printf("[I%d][Railway_Signal_Output_Task] %s (signal %d) -> %s\n",
-                   ctx->id, which, msg.body.set_rail.signal_id,
-                   lc_rail_name(msg.body.set_rail.colour));
-            fflush(stdout);
+            if (ctx->verbose) {
+                const char *which = (msg.body.set_rail.signal_id == RAIL_SIGNAL_TRAIN)
+                                        ? "train light" : "crossing lights";
+                printf("[I%d][Railway_Signal_Output_Task] %s (signal %d) -> %s\n",
+                       ctx->id, which, msg.body.set_rail.signal_id,
+                       lc_rail_name(msg.body.set_rail.colour));
+                fflush(stdout);
+            }
         } else {
             reply.result = FAULT_CONFIG;
         }

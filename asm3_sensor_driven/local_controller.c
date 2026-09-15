@@ -34,12 +34,14 @@
  * Build:
  *   see Makefile.poc, or build.sh
  * Run:
- *   ./local_controller -i 1 [-c <cc_node_name>] [-T HH:MM] [-N]
+ *   ./local_controller -i 1 [-c <cc_node_name>] [-T HH:MM] [-N] [-v]
  *     -i  intersection id
  *     -c  QNET node the CC lives on (omit for same-node testing)
  *     -T  seed the simulated clock, e.g. -T 06:28 to start just before
  *         a morning peak train
  *     -N  do not run the train timetable (manual 't'/'c' keys only)
+ *     -v  verbose: also log every signal-head, railway-signal and gate
+ *         command, not just the one-line status summary
  * ===================================================================== */
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,6 +71,72 @@
 
 /* Connection the 100ms POSIX timer delivers its pulse on. */
 static int g_timer_coid;
+
+/* ---------------------------------------------------------------------
+ * One-line status summary, printed whenever something visible changes:
+ * the step, a signal head, the gate, the mode or the faults. This is the
+ * line to read; the per-head output lines only appear with -v.
+ * Runs on Phase_Controller_Task, the only writer of these fields, so it
+ * reads them without the lock.
+ * ------------------------------------------------------------------- */
+typedef struct {
+    lc_step_t       step;
+    control_mode_t  mode;
+    vehicle_state_t ns, ew;
+    arrow_state_t   ns_arrow, ew_arrow;
+    ped_state_t     ped;
+    gate_state_t    gate;
+    uint32_t        faults;
+} lc_view_t;
+
+static void print_status_line(lc_context_t *ctx)
+{
+    static lc_view_t last;
+    static int       have_last = 0;
+
+    lc_view_t v;
+    memset(&v, 0, sizeof(v));
+    v.step     = ctx->step;
+    v.mode     = ctx->mode;
+    v.ns       = ctx->ns_state;
+    v.ew       = ctx->ew_state;
+    v.ns_arrow = ctx->ns_arrow;
+    v.ew_arrow = ctx->ew_arrow;
+    v.ped      = ctx->ped_state;
+    v.gate     = ctx->gate_state;
+    v.faults   = ctx->fault_flags;
+
+    if (have_last && memcmp(&v, &last, sizeof(v)) == 0) return;
+    memcpy(&last, &v, sizeof(v));
+    have_last = 1;
+
+    /* Time left in the step, in real-world seconds like every other
+     * duration the LC logs. */
+    int left_s = (ctx->countdown_ms > 0)
+                     ? (ctx->countdown_ms * TIME_SCALE_FACTOR + 999) / 1000 : 0;
+
+    /* Wall-clock stamp, the same clock the CC stamps its log with, so the
+     * two consoles can be lined up line for line. */
+    time_t now = time(NULL);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    char ts[16];
+    strftime(ts, sizeof(ts), "%H:%M:%S", &lt);
+
+    char ns[16], ew[16];
+    snprintf(ns, sizeof(ns), "%s%s", lc_vehicle_name(v.ns), (v.ns_arrow == ARROW_GREEN) ? "+ARROW" : "");
+    snprintf(ew, sizeof(ew), "%s%s", lc_vehicle_name(v.ew), (v.ew_arrow == ARROW_GREEN) ? "+ARROW" : "");
+
+    printf("[I%d %s] %-15s %3ds  NS:%-11s EW:%-11s PED:%-9s GATE:%-8s %s",
+           ctx->id, ts, lc_step_name(v.step), left_s, ns, ew,
+           lc_ped_name(v.ped), lc_gate_name(v.gate), lc_mode_name(v.mode));
+    if (v.faults) {
+        char f[64];
+        printf("  FAULT:%s", fault_flags_str(v.faults, f, sizeof(f)));
+    }
+    printf("\n");
+    fflush(stdout);
+}
 
 /* ---------------------------------------------------------------------
  * One step's countdown reached zero. Ask each module in priority order
@@ -153,6 +221,8 @@ static void phase_controller_task(lc_context_t *ctx)
         default:
             break;
         }
+
+        print_status_line(ctx);
     }
 }
 
@@ -173,9 +243,10 @@ int main(int argc, char **argv)
     char  cc_node[CC_NODE_MAXLEN] = "";
     int   seed_sod = -1;
     int   run_timetable = 1;
+    int   verbose = 0;
 
     int opt;
-    while ((opt = getopt(argc, argv, "i:c:T:N")) != -1) {
+    while ((opt = getopt(argc, argv, "i:c:T:Nv")) != -1) {
         switch (opt) {
         case 'i': id = atoi(optarg); break;
         case 'c': strncpy(cc_node, optarg, sizeof(cc_node) - 1); break;
@@ -184,12 +255,14 @@ int main(int argc, char **argv)
             if (seed_sod < 0) { fprintf(stderr, "bad -T value '%s', expected HH:MM\n", optarg); return 1; }
             break;
         case 'N': run_timetable = 0; break;
+        case 'v': verbose = 1; break;
         default: break;
         }
     }
 
     lc_context_t *ctx = lc_ctx();
     lc_context_init(ctx, id, cc_node);
+    ctx->verbose = verbose;
 
     /* UC-01 startup: validate the phase table before driving anything. */
     if (phase_table_validate() != 0) {

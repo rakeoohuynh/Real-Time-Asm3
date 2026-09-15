@@ -67,6 +67,7 @@ typedef struct {
 typedef struct {
     int   id;
     char  cc_node[CC_NODE_MAXLEN];   /* "" = same node as LC */
+    int   verbose;                   /* -v: also log every signal-head and gate command */
 
     pthread_mutex_t lock;
 
@@ -170,6 +171,8 @@ const char *lc_vehicle_name(vehicle_state_t s);
 const char *lc_ped_name(ped_state_t s);
 const char *lc_rail_name(rail_signal_t s);
 const char *lc_arrow_name(arrow_state_t s);
+const char *lc_gate_name(gate_state_t s);
+const char *lc_mode_name(control_mode_t m);
 
 /* Scaled sleep, for the two tasks that simulate mechanical/hardware time. */
 void        lc_delay_real_ms(int real_ms);

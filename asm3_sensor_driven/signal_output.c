@@ -18,20 +18,25 @@ void *signal_output_task(void *arg)
         local_reply_t reply = { .result = 0, .elapsed_ms = 0 };
         int force_fault = (getenv("LC_FORCE_SIGNAL_FAULT") != NULL);
 
+        /* Per-head lines only with -v; the status line in
+         * local_controller.c already shows the resulting state. */
         if (msg.type == MSG_SET_VEHICLE) {
-            printf("[I%d][Signal_Output_Task] vehicle head %d -> %s (%ds)\n",
-                   ctx->id, msg.body.set_vehicle.head_id,
-                   lc_vehicle_name(msg.body.set_vehicle.state), msg.body.set_vehicle.duration_s);
+            if (ctx->verbose)
+                printf("[I%d][Signal_Output_Task] vehicle head %d -> %s (%ds)\n",
+                       ctx->id, msg.body.set_vehicle.head_id,
+                       lc_vehicle_name(msg.body.set_vehicle.state), msg.body.set_vehicle.duration_s);
             reply.result = force_fault ? FAULT_SIGNAL_TIMEOUT : 0;
         } else if (msg.type == MSG_SET_PEDESTRIAN) {
-            printf("[I%d][Signal_Output_Task] ped head %d -> %s (%ds)\n",
-                   ctx->id, msg.body.set_pedestrian.crossing_id,
-                   lc_ped_name(msg.body.set_pedestrian.state), msg.body.set_pedestrian.duration_s);
+            if (ctx->verbose)
+                printf("[I%d][Signal_Output_Task] ped head %d -> %s (%ds)\n",
+                       ctx->id, msg.body.set_pedestrian.crossing_id,
+                       lc_ped_name(msg.body.set_pedestrian.state), msg.body.set_pedestrian.duration_s);
             reply.result = force_fault ? FAULT_PED_OUTPUT : 0;
         } else if (msg.type == MSG_SET_RIGHT_TURN_ARROW) {
-            printf("[I%d][Signal_Output_Task] right-turn arrow head %d -> %s (%ds)\n",
-                   ctx->id, msg.body.set_arrow.head_id,
-                   lc_arrow_name(msg.body.set_arrow.state), msg.body.set_arrow.duration_s);
+            if (ctx->verbose)
+                printf("[I%d][Signal_Output_Task] right-turn arrow head %d -> %s (%ds)\n",
+                       ctx->id, msg.body.set_arrow.head_id,
+                       lc_arrow_name(msg.body.set_arrow.state), msg.body.set_arrow.duration_s);
             reply.result = force_fault ? FAULT_SIGNAL_TIMEOUT : 0;
         } else {
             reply.result = FAULT_CONFIG;

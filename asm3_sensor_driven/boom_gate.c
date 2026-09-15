@@ -45,9 +45,11 @@ void *boom_gate_task(void *arg)
         int gate_id   = msg.body.boom_gate.gate_id;
         int timeout_s = msg.body.boom_gate.timeout_s;
 
-        printf("[I%d][Boom_Gate_Controller_Task] gate %d command=%s, timeout=%ds\n",
-               ctx->id, gate_id, closing ? "CLOSE" : "OPEN", timeout_s);
-        fflush(stdout);
+        if (ctx->verbose) {
+            printf("[I%d][Boom_Gate_Controller_Task] gate %d command=%s, timeout=%ds\n",
+                   ctx->id, gate_id, closing ? "CLOSE" : "OPEN", timeout_s);
+            fflush(stdout);
+        }
 
         /* Accept the command and release the controller straight away;
          * the travel time is simulated below on this thread. */
@@ -68,13 +70,15 @@ void *boom_gate_task(void *arg)
         lc_delay_real_ms(travel_s * 1000);
 
         int result = (travel_s > timeout_s) ? FAULT_BOOM_GATE : 0;
-        if (result != 0)
+        if (result != 0) {
             printf("[I%d][Boom_Gate_Controller_Task] gate %d FAULT (timeout after %ds)\n",
                    ctx->id, gate_id, travel_s);
-        else
+            fflush(stdout);
+        } else if (ctx->verbose) {
             printf("[I%d][Boom_Gate_Controller_Task] gate %d %s confirmed\n",
                    ctx->id, gate_id, closing ? "LOCKED" : "OPENED");
-        fflush(stdout);
+            fflush(stdout);
+        }
 
         MsgSendPulse(coid_phase, SIGEV_PULSE_PRIO_INHERIT, PULSE_GATE_STATUS,
                      GATE_PULSE_PACK(result, closing, gate_id));

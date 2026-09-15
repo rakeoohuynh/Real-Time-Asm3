@@ -209,6 +209,33 @@ typedef enum { LC_PHASE_NS = 0, LC_PHASE_EW, LC_PHASE_PED, LC_PHASE_RAIL_PROTECT
 #define FAULT_BOOM_GATE         3
 #define FAULT_CONFIG            4
 
+static inline const char *fault_name(int code)
+{
+    switch (code) {
+    case FAULT_SIGNAL_TIMEOUT: return "SIGNAL_TIMEOUT";
+    case FAULT_PED_OUTPUT:     return "PED_OUTPUT";
+    case FAULT_BOOM_GATE:      return "BOOM_GATE";
+    case FAULT_CONFIG:         return "CONFIG";
+    default:                   return "NONE";
+    }
+}
+
+/* A fault_flags bitmask (bit n = fault code n) as "BOOM_GATE,CONFIG",
+ * or "none" when no bit is set. */
+static inline const char *fault_flags_str(uint32_t flags, char *buf, size_t len)
+{
+    size_t used = 0;
+    buf[0] = '\0';
+    for (int code = FAULT_SIGNAL_TIMEOUT; code <= FAULT_CONFIG; code++) {
+        if (!(flags & (1u << code))) continue;
+        int n = snprintf(buf + used, len - used, "%s%s", used ? "," : "", fault_name(code));
+        if (n < 0 || (size_t)n >= len - used) break;
+        used += (size_t)n;
+    }
+    if (buf[0] == '\0') snprintf(buf, len, "none");
+    return buf;
+}
+
 typedef struct {
     local_msg_type_t type;
     union {
