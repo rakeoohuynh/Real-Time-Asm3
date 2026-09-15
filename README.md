@@ -34,15 +34,34 @@ demand on NS/EW, `c` for train cleared. In the CC console: `status`,
 
 ## Run -- real QNET multi-node demo
 
+On each VM, go to the folder holding the binary and make it executable
+(`central_controller` on the CC's node, `local_controller` on each LC's
+node):
+
+```
+cd /tmp
+chmod +x central_controller   # or: chmod +x local_controller
+```
+
+Then start each process in the foreground (no `&` -- both read commands
+from stdin):
+
 ```
 # on the CC's node
-./central_controller &
+./central_controller
 
 # on I1's node
 ./local_controller -i 1 -c <cc_node_name>
 
 # on I2's node
 ./local_controller -i 2 -c <cc_node_name>
+```
+
+If the machines can't see each other (`ls /net` does not list the other
+node), run this on each VM, then check `ls /net` again:
+
+```
+setconf _CS_DOMAIN net.intra
 ```
 
 `-c` tells the LC which QNET node to find the CC on; the CC does not
