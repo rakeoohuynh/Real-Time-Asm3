@@ -6,43 +6,45 @@
 #   make -f Makefile.poc clean
 #
 # Kept separate from the Momentics recursive Makefile in this directory:
-# that one globs every .c in the folder into a single target, which
-# cannot work now that the folder holds three programs with their own
-# main(). See the note in README.md.
+# that one builds a single target from the project folder, which cannot
+# work for two programs with their own main(). See the note in README.md.
+#
+# Layout: shared/ (used by both programs), lc/ (Local Controller),
+# cc/ (Central Controller). Objects are written next to their sources.
 # =====================================================================
 
-CC      ?= qcc
+# Plain '=' not '?=': make predefines CC=cc, so '?=' would never apply.
+# It can still be overridden on the command line (make CC=...).
+CC      = qcc
 TARGETV ?= -Vgcc_ntox86_64
 SCALE   ?= 5
 
-CFLAGS  = $(TARGETV) -Wall -Wextra -Wno-unused-parameter -DTIME_SCALE_FACTOR=$(SCALE)
+CFLAGS  = $(TARGETV) -Wall -Wextra -Wno-unused-parameter -DTIME_SCALE_FACTOR=$(SCALE) \
+          -Ishared -Ilc -Icc
 LDLIBS  = -lpthread -lsocket
 
 LC_SRCS = \
-	local_controller.c \
-	lc_context.c \
-	phase_table.c \
-	signal_output.c \
-	boom_gate.c \
-	railway_protection.c \
-	train_schedule.c \
-	pedestrian.c \
-	fixed_timing.c \
-	sensor_driven.c \
-	right_turn.c \
-	status_report.c \
-	central_command_server.c \
-	console_input.c
+	lc/local_controller.c \
+	lc/lc_context.c \
+	lc/phase_table.c \
+	lc/signal_output.c \
+	lc/boom_gate.c \
+	lc/railway_protection.c \
+	lc/train_schedule.c \
+	lc/pedestrian.c \
+	lc/fixed_timing.c \
+	lc/sensor_driven.c \
+	lc/right_turn.c \
+	lc/status_report.c \
+	lc/central_command_server.c \
+	lc/console_input.c
 
-CC_SRCS = central_controller.c
+CC_SRCS = cc/central_controller.c
 
 LC_OBJS = $(LC_SRCS:.c=.o)
 CC_OBJS = $(CC_SRCS:.c=.o)
 
-HEADERS = common.h lc_context.h phase_table.h signal_output.h boom_gate.h \
-          railway_protection.h train_schedule.h pedestrian.h fixed_timing.h \
-          sensor_driven.h right_turn.h status_report.h central_command_server.h \
-          console_input.h
+HEADERS = $(wildcard shared/*.h lc/*.h cc/*.h)
 
 all: local_controller central_controller
 

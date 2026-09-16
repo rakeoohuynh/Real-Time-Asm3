@@ -397,6 +397,8 @@ static void requeue_command(const pending_cmd_t *job)
 /* Block until a queued command is due, then remove and return it. */
 static pending_cmd_t dequeue_due_command(void)
 {
+    pending_cmd_t job;
+
     pthread_mutex_lock(&g_cmdq_lock);
     for (;;) {
         pending_cmd_t *next = NULL;
@@ -410,10 +412,9 @@ static pending_cmd_t dequeue_due_command(void)
         }
         uint64_t now = now_ms();
         if (next->not_before_ms <= now) {
-            pending_cmd_t job = *next;
+            job = *next;
             next->in_use = 0;
-            pthread_mutex_unlock(&g_cmdq_lock);
-            return job;
+            break;
         }
         struct timespec until;
         clock_gettime(CLOCK_MONOTONIC, &until);
@@ -423,6 +424,8 @@ static pending_cmd_t dequeue_due_command(void)
         if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
         pthread_cond_timedwait(&g_cmdq_cond, &g_cmdq_lock, &until);
     }
+    pthread_mutex_unlock(&g_cmdq_lock);
+    return job;
 }
 
 /* Cached command connection to an LC, opening it if needed. name_open()

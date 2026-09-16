@@ -1,23 +1,38 @@
 # LC / CC proof-of-concept -- build & run notes
 
-Three files:
-- `common.h` -- shared message structs, timing constants (A1-A46) and
-  the message set from Section 8's inter-task table.
-- `local_controller.c` -- one Local Controller process (run once per
-  intersection, e.g. `-i 1` for I1). Implements Phase_Controller_Task,
-  Signal_Output_Task, Railway_Signal_Output_Task, Boom_Gate_Controller_Task,
-  Status_Reporting_Task and Central_Command_Server_Task as described in
-  Section 7, plus keyboard-simulated sensor/pedestrian/train input.
-- `central_controller.c` -- the Central Controller process: a small
-  server-thread pool for STATUS_UPDATE/FAULT_ALARM ingestion, a console
-  dashboard, and an operator console for OVERRIDE_COMMAND / MODE_SWITCH.
+Source layout (`asm3_sensor_driven/`):
+- `shared/` -- used by both programs. `common.h` holds the shared message
+  structs, timing constants (A1-A46) and the message set from Section 8's
+  inter-task table.
+- `lc/` -- the Local Controller process (run once per intersection, e.g.
+  `-i 1` for I1). `local_controller.c` is the entry point; each task
+  (Phase_Controller_Task, Signal_Output_Task, Railway_Signal_Output_Task,
+  Boom_Gate_Controller_Task, Status_Reporting_Task,
+  Central_Command_Server_Task, keyboard-simulated sensor/pedestrian/train
+  input) lives in its own module, as mapped at the top of
+  `local_controller.c`.
+- `cc/` -- the Central Controller process, `central_controller.c`: a
+  small server-thread pool for STATUS_UPDATE/FAULT_ALARM ingestion, a
+  console dashboard, and an operator console for OVERRIDE_COMMAND /
+  MODE_SWITCH.
 
-## Build (QNX qcc, matches the qcc-terminal workflow already in use)
+## Build (QNX qcc)
+
+From `asm3_sensor_driven/`:
 
 ```
-qcc -Vgcc_ntox86_64 -o local_controller   local_controller.c   -lpthread -lsocket
-qcc -Vgcc_ntox86_64 -o central_controller central_controller.c -lpthread -lsocket
+./build.sh                 # or: make -f Makefile.poc
 ```
+
+or by hand:
+
+```
+qcc -Vgcc_ntox86_64 -Ishared -Ilc -o local_controller   lc/*.c         -lpthread -lsocket
+qcc -Vgcc_ntox86_64 -Ishared      -o central_controller cc/central_controller.c -lpthread -lsocket
+```
+
+If the linker reports `cannot find -lpthread`, drop that flag: on QNX 7.1
+the pthread functions are part of libc.
 
 ## Run -- same node (quick functional test)
 
