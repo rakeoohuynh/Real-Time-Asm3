@@ -120,6 +120,10 @@ typedef struct {
     control_mode_t mode_switch_requested;
 
     int   min_green_elapsed;  /* set once the current GREEN has held >= VEHICLE_MIN_GREEN_S */
+
+    /* 'g' key: make the next boom-gate CLOSE time out. Set by the console
+     * thread, consumed by Boom_Gate_Controller_Task, guarded by lock. */
+    int   gate_fault_armed;
 } lc_context_t;
 
 /* The one instance. Modules take it as a parameter; this accessor exists
@@ -165,6 +169,11 @@ uint64_t    lc_now_ms(void);
 void        lc_raise_fault(lc_context_t *ctx, int fault_code);
 void        lc_clear_fault(lc_context_t *ctx, int fault_code);
 uint32_t    lc_fault_flags(lc_context_t *ctx);
+
+/* Simulated boom-gate fault ('g' key): arm it, then the gate task takes
+ * it -- returns 1 exactly once per arming, clearing it. */
+void        lc_arm_gate_fault(lc_context_t *ctx);
+int         lc_take_gate_fault(lc_context_t *ctx);
 
 /* --- display helpers shared by several modules ------------------------- */
 const char *lc_vehicle_name(vehicle_state_t s);

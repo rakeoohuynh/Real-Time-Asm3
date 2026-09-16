@@ -58,11 +58,14 @@ void *boom_gate_task(void *arg)
 
         /* LC_FORCE_GATE_FAULT       -- every close attempt times out.
          * LC_FORCE_GATE_FAULT_ONCE  -- only the first attempt does, so a
-         *                              demo can show the retry recovering. */
+         *                              demo can show the retry recovering.
+         * 'g' key                   -- the next close attempt times out;
+         *                              consumed here, so the retry succeeds. */
         int forced_always = closing && (getenv("LC_FORCE_GATE_FAULT") != NULL);
         int forced_once   = closing && (getenv("LC_FORCE_GATE_FAULT_ONCE") != NULL)
                                     && (g_close_attempts <= 1);
-        int forced        = forced_always || forced_once;
+        int forced_key    = closing && lc_take_gate_fault(ctx);
+        int forced        = forced_always || forced_once || forced_key;
 
         int travel_s = closing ? RAIL_GATE_LOWER_S : GATE_RAISE_S;
         if (forced) travel_s = timeout_s + 1;

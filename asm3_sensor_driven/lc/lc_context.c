@@ -184,6 +184,22 @@ void lc_clear_fault(lc_context_t *ctx, int fault_code)
     pthread_mutex_unlock(&ctx->lock);
 }
 
+void lc_arm_gate_fault(lc_context_t *ctx)
+{
+    pthread_mutex_lock(&ctx->lock);
+    ctx->gate_fault_armed = 1;
+    pthread_mutex_unlock(&ctx->lock);
+}
+
+int lc_take_gate_fault(lc_context_t *ctx)
+{
+    pthread_mutex_lock(&ctx->lock);
+    int armed = ctx->gate_fault_armed;
+    ctx->gate_fault_armed = 0;
+    pthread_mutex_unlock(&ctx->lock);
+    return armed;
+}
+
 uint32_t lc_fault_flags(lc_context_t *ctx)
 {
     pthread_mutex_lock(&ctx->lock);

@@ -180,12 +180,21 @@ The LC prints its key list on startup. Each key is one line on stdin:
 | `e` | Vehicle detected on the EW approach |
 | `t` | Train approaching; starts railway protection |
 | `c` | Train cleared; ends railway protection |
+| `g` | Boom-gate fault: the next gate CLOSE times out. The retry succeeds |
 | `q` | Stop the input task. The control tasks keep running |
 
 `n` and `e` only change the outcome in sensor-driven mode, where absent
 demand lets the current green be cut early. In fixed-timing mode the cycle
 runs to its full length regardless. `t` and `c` work in both modes, since
 railway protection outranks everything else.
+
+`g` only arms the fault; it happens when the gate is next told to close,
+i.e. during railway protection after the warning flash. To demo it, press
+`g`, then `t` (or wait for a scheduled train). The LC logs `BOOM GATE
+FAULT`, turns the train light RED and sends a `FAULT_ALARM`, which the CC
+logs and shows under FAULTS. After `GATE_RETRY_INTERVAL_S` the retry locks
+the gate and the fault clears. To make every attempt fail instead, start
+the LC with `LC_FORCE_GATE_FAULT=1 ./local_controller ...`.
 
 ## Where each requirement lands in the code
 

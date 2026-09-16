@@ -11,7 +11,7 @@ void *console_input_task(void *arg)
 {
     lc_context_t *ctx = arg;
     printf("[I%d] keys: p=pedestrian  n=vehicle(NS)  e=vehicle(EW)  "
-           "t=train approach (manual)  c=train cleared  q=quit\n", ctx->id);
+           "t=train approach (manual)  c=train cleared  g=fail next gate close  q=quit\n", ctx->id);
     fflush(stdout);
 
     char line[16];
@@ -22,6 +22,12 @@ void *console_input_task(void *arg)
             case 'e': vehicle_sensor_handle_detect(ctx, 0); break;
             case 't': train_sensor_handle_approach(ctx); break;
             case 'c': train_sensor_handle_cleared(ctx); break;
+            case 'g':
+                lc_arm_gate_fault(ctx);
+                printf("[I%d][Console] boom-gate fault ARMED: the next gate CLOSE will time out "
+                       "(the retry will succeed)\n", ctx->id);
+                fflush(stdout);
+                break;
             case 'q': printf("[I%d] shutting down input task\n", ctx->id); return NULL;
             default: break;
         }
