@@ -86,9 +86,11 @@ void apply_pending_cc_commands(lc_context_t *ctx)
     pthread_mutex_unlock(&ctx->lock);
 
     if (has_mode) {
-        printf("[I%d][Phase_Controller_Task] MODE_SWITCH applied: mode=%d\n", ctx->id, new_mode);
+        printf("[I%d][Phase_Controller_Task] MODE_SWITCH applied: mode=%s "
+               "(held until the next A26 period boundary)\n", ctx->id, lc_mode_name(new_mode));
         fflush(stdout);
         lc_set_mode(ctx, new_mode);
+        notify_status(ctx, 0, 0, 0);   /* let the CC see the new mode now */
     }
 
     if (!has_override) return;

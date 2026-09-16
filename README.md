@@ -141,6 +141,30 @@ acceptance and application, `apply_pending_cc_commands()` discards the
 command and prints `OVERRIDE_COMMAND ... DISCARDED`. MODE_SWITCH is always
 accepted; it changes sequencing policy, not the current signal state.
 
+## Control mode by time of day (A26)
+
+Each LC picks its own control mode from the service period, so it keeps
+doing so even when the CC link is down:
+
+| Period | Hours | Mode |
+|---|---|---|
+| Peak | 06:30-09:00, 16:30-19:30 | fixed timing |
+| Off-peak | 09:00-16:30, 19:30-22:00 | sensor-driven |
+| Night | 22:00-06:30 | sensor-driven |
+
+The period is read from the simulated clock, the same one the train
+timetable uses. So `-T` moves both, e.g. `-T 08:58` shows the switch from
+FIXED to SENSOR about 2 simulated minutes (24 real seconds at the default
+factor of 5) after start. The LC logs each switch:
+
+```
+[I1][Mode_Schedule] reached 09:00 OFF-PEAK period -> SENSOR mode (A26)
+```
+
+A CC `mode <id> <fixed|sensor>` still applies at once and overrides the
+schedule until the next period boundary, where the schedule takes over
+again.
+
 ## Local Controller -- flags and keys
 
 ```
@@ -151,7 +175,7 @@ accepted; it changes sequencing policy, not the current signal state.
 |---|---|
 | `-i <id>` | Intersection id, e.g. `-i 1` for I1. Also fixes this LC's own channel name, `lc_I<id>`, which the CC opens to send commands back |
 | `-c <node>` | QNET node the CC runs on. Omit for same-node testing |
-| `-T HH:MM` | Seed the simulated clock, e.g. `-T 06:28` to start just before a morning peak train |
+| `-T HH:MM` | Seed the simulated clock, e.g. `-T 06:28` to start just before a morning peak train. The A26 control mode follows this clock too |
 | `-N` | Do not run the train timetable; trains then arrive only via the `t` key |
 | `-v` | Verbose: also log every signal-head, railway-signal, right-turn-arrow and boom-gate command |
 
@@ -203,7 +227,7 @@ the LC with `LC_FORCE_GATE_FAULT=1 ./local_controller ...`.
 | LC operates continuously, independent of CC | `phase_controller_task()` runs on the LC's own thread/timer and never blocks on CC I/O |
 | LC keeps running if the link/CC fails | `status_reporting_task()` + `send_report()` (UC-08 retry/back-off) |
 | LC senses railway crossing, no control over it | `train_sensor_handle_approach/cleared()` -> `PULSE_TRAIN_APPROACH/CLEARED` -> `begin_rail_protection()` |
-| Fixed-timing / sensor-driven / mode switch | `ctx->mode`, sensor-driven early-cut logic in `phase_controller_task()`, `NET_MODE_SWITCH` handling |
+| Fixed-timing / sensor-driven / mode switch | `ctx->mode`, `mode_schedule.c` (A26 time-of-day mode), sensor-driven early-cut logic in `phase_controller_task()`, `NET_MODE_SWITCH` handling |
 | Pedestrian buttons + signals | `pedestrian_input_handle_press()`, `begin_ped_walk()`, `STEP_PED_WALK/CLEARANCE` |
 | LC->CC status on every state change | `notify_status()` calls sprinkled through every `begin_*`/`advance_*` function |
 | CC displays intersections | `display_task()` / `status` operator command |

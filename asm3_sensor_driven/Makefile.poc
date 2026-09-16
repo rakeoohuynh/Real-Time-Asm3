@@ -34,6 +34,7 @@ LC_SRCS = \
 	lc/pedestrian.c \
 	lc/fixed_timing.c \
 	lc/sensor_driven.c \
+	lc/mode_schedule.c \
 	lc/right_turn.c \
 	lc/status_report.c \
 	lc/central_command_server.c \

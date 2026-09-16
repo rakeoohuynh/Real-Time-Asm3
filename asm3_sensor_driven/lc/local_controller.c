@@ -25,6 +25,7 @@
  * Sequencing logic by mode/feature:
  *   fixed-timing cycle           -> fixed_timing.c
  *   sensor-driven early cut      -> sensor_driven.c
+ *   mode by time of day (A26)    -> mode_schedule.c
  *   pedestrian WALK sequence     -> pedestrian.c
  *   railway protection (UC-05)   -> railway_protection.c
  *   right-turn arrows            -> right_turn.c
@@ -38,7 +39,7 @@
  *     -i  intersection id
  *     -c  QNET node the CC lives on (omit for same-node testing)
  *     -T  seed the simulated clock, e.g. -T 06:28 to start just before
- *         a morning peak train
+ *         a morning peak train; the A26 control mode follows it too
  *     -N  do not run the train timetable (manual 't'/'c' keys only)
  *     -v  verbose: also log every signal-head, railway-signal and gate
  *         command, not just the one-line status summary
@@ -63,6 +64,7 @@
 #include "pedestrian.h"
 #include "fixed_timing.h"
 #include "sensor_driven.h"
+#include "mode_schedule.h"
 #include "right_turn.h"
 #include "status_report.h"
 #include "central_command_server.h"
@@ -164,7 +166,7 @@ static void advance_step(lc_context_t *ctx)
  * ========================================================================= */
 static void phase_controller_task(lc_context_t *ctx)
 {
-    lc_set_mode(ctx, MODE_FIXED_TIMING);
+    mode_schedule_init(ctx);
     right_turn_init(ctx);
     fixed_timing_begin_ns_green(ctx);
     lc_set_phase(ctx, LC_PHASE_NS);
@@ -191,6 +193,7 @@ static void phase_controller_task(lc_context_t *ctx)
         case PULSE_PHASE_TIMER:
             ctx->countdown_ms -= PHASE_TICK_MS;
             right_turn_tick(ctx, PHASE_TICK_MS);
+            mode_schedule_tick(ctx);
             sensor_driven_tick(ctx);
             if (ctx->countdown_ms <= 0) advance_step(ctx);
             break;
@@ -309,8 +312,9 @@ int main(int argc, char **argv)
     pthread_create(&th, NULL, central_command_server_task, ctx); pthread_detach(th);
     pthread_create(&th, NULL, console_input_task, ctx);          pthread_detach(th);
 
+    /* Seeded even with -N: the A26 mode schedule reads this clock. */
+    train_schedule_init(seed_sod);
     if (run_timetable) {
-        train_schedule_init(seed_sod);
         train_schedule_build(ctx);
         train_schedule_start(ctx);
     } else {
