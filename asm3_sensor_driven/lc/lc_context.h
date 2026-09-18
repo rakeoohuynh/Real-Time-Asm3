@@ -1,23 +1,20 @@
-/* =====================================================================
+/*
  * lc_context.h
  *
- * OWNER OF ALL SHARED LOCAL CONTROLLER STATE.
+ * All Local Controller state lives in one lc_context_t, passed to every
+ * module. There is one instance, in lc_context.c.
  *
- * Every other LC module receives an lc_context_t* and reads/writes it
- * through this module's accessors rather than through file-scope
- * globals of its own. The single instance lives in lc_context.c.
+ * Locking: the mutex covers only fields that more than one thread
+ * touches -- mode, the coarse phase, the signal states that
+ * Status_Reporting_Task snapshots, the fault flags, the safety view and
+ * the pending CC commands. Phase_Controller_Task is the only writer of
+ * the reported fields. It writes them through the lc_set_* setters,
+ * which take the lock, and can read them back without it.
  *
- * Locking rule: the mutex guards only the fields that more than one
- * thread touches -- mode, the coarse phase, the signal states that
- * Status_Reporting_Task snapshots, the fault flags, the safety view, and
- * the pending CC command slots. Phase_Controller_Task is the only writer
- * of the reported fields; it writes them through the lc_set_* setters
- * (which take the lock) and may read them back without it.
- *
- * Phase_Controller_Task owns the fine-grained step and countdown outright
- * and needs no lock for them -- which is exactly why no other thread may
- * read them. Other threads read the published lc_safety_view_t instead.
- * ===================================================================== */
+ * step and countdown_ms belong to Phase_Controller_Task and are never
+ * locked, so no other thread may read them. Other threads use the
+ * published lc_safety_view_t instead.
+ */
 #ifndef LC_CONTEXT_H
 #define LC_CONTEXT_H
 
@@ -26,25 +23,22 @@
 
 #define CC_NODE_MAXLEN 64
 
-/* Fine-grained sequencing state owned by Phase_Controller_Task.
- *
- * The railway steps spell out the full UC-05 sequence; each one is a
- * real countdown state driven by the 100ms tick, so the pre-arrival
- * window adds up to exactly RAIL_PROTECT_LEAD_S and nothing blocks the
- * controller thread while the gate moves. */
+/* Each railway step is a real countdown driven by the 100ms tick, so the
+ * lead window adds up to exactly RAIL_PROTECT_LEAD_S and the controller
+ * thread never blocks while the gate moves. */
 typedef enum {
     STEP_NS_GREEN, STEP_NS_YELLOW, STEP_NS_ALLRED,
     STEP_EW_GREEN, STEP_EW_YELLOW, STEP_EW_ALLRED,
     STEP_PED_WALK, STEP_PED_CLEARANCE,
 
-    STEP_RAIL_YELLOW,        /* clearing the intersection  (A2)  */
-    STEP_RAIL_ALLRED,        /* clearance interval         (A3)  */
-    STEP_RAIL_PREARRIVAL,    /* quiet protection hold            */
-    STEP_RAIL_WARN,          /* flashing crossing warning  (A15) */
-    STEP_RAIL_GATE_LOWER,    /* gate in motion             (A16) */
-    STEP_RAIL_GATE_FAULT,    /* gate did not lock: retrying      */
-    STEP_RAIL_OCCUPIED,      /* train on the crossing      (A18) */
-    STEP_RAIL_POST_HOLD,     /* gate stays down            (A17) */
+    STEP_RAIL_YELLOW,        /* clear the intersection */
+    STEP_RAIL_ALLRED,
+    STEP_RAIL_PREARRIVAL,    /* quiet hold before the warning */
+    STEP_RAIL_WARN,          /* crossing lights flashing */
+    STEP_RAIL_GATE_LOWER,
+    STEP_RAIL_GATE_FAULT,    /* gate didn't lock; waiting to retry */
+    STEP_RAIL_OCCUPIED,      /* train on the crossing */
+    STEP_RAIL_POST_HOLD,     /* gate stays down after the train */
     STEP_RAIL_GATE_RAISE,
 
     STEP_OVERRIDE_HOLD,
@@ -53,129 +47,118 @@ typedef enum {
     STEP__COUNT
 } lc_step_t;
 
-#define OVERRIDE_HOLD_S   20   /* PoC: how long a forced override state is held */
+#define OVERRIDE_HOLD_S   20   /* how long a CC override holds before normal control resumes */
 
-/* What Central_Command_Server_Task needs to judge an override, published
- * by lc_enter_step() under the lock on every step change. */
+/* What Central_Command_Server_Task checks before accepting an override.
+ * lc_enter_step() republishes it on every step change. */
 typedef struct {
-    int      rail_active;     /* a railway protection step is running       */
-    int      ped_crossing;    /* a pedestrian WALK/CLEARANCE step is running */
+    int      rail_active;     /* a railway protection step is running */
+    int      ped_crossing;    /* WALK or CLEARANCE is running */
     uint64_t busy_until_ms;   /* lc_now_ms() estimate of when the whole
-                                 blocking sequence ends, not just this step */
+                                 railway or pedestrian sequence ends */
 } lc_safety_view_t;
 
 typedef struct {
     int   id;
-    char  cc_node[CC_NODE_MAXLEN];   /* "" = same node as LC */
+    char  cc_node[CC_NODE_MAXLEN];   /* "" = CC on the same node */
     int   verbose;                   /* -v: also log every signal-head and gate command */
 
     pthread_mutex_t lock;
 
-    /* channels owned by this process */
-    int   phase_chid;   /* Phase_Controller_Task  */
-    int   sig_chid;     /* Signal_Output_Task     */
-    int   rail_chid;    /* Railway_Signal_Output_Task */
-    int   gate_chid;    /* Boom_Gate_Controller_Task  */
-    int   status_chid;  /* Status_Reporting_Task  */
-    int   net_chid;     /* CC-facing external channel (Central_Command_Server_Task) */
+    /* Channels this process owns, one per receiving task. */
+    int   phase_chid;
+    int   sig_chid;
+    int   rail_chid;
+    int   gate_chid;
+    int   status_chid;
+    int   net_chid;     /* named channel the CC sends commands to */
 
-    /* internal connections (client side, used to signal other local tasks) */
-    int   coid_phase;   /* -> phase_chid, used by other threads to wake Phase_Controller_Task */
-    int   coid_status;  /* -> status_chid, used by Phase_Controller_Task to push STATUS/ALARM */
-    int   coid_sig;     /* -> sig_chid   */
-    int   coid_rail;    /* -> rail_chid  */
-    int   coid_gate;    /* -> gate_chid  */
+    /* Connections to the channels above. */
+    int   coid_phase;   /* used by other threads to wake Phase_Controller_Task */
+    int   coid_status;
+    int   coid_sig;
+    int   coid_rail;
+    int   coid_gate;
 
-    /* control-loop state (owned by Phase_Controller_Task, read by others under lock) */
     control_mode_t   mode;
-    lc_phase_t       phase;       /* coarse phase reported to CC */
-    lc_step_t        step;        /* fine-grained sequencing state */
+    lc_phase_t       phase;       /* coarse phase reported to the CC */
+    lc_step_t        step;
     int              countdown_ms;
     vehicle_state_t  ns_state, ew_state;
     ped_state_t      ped_state;
     gate_state_t     gate_state;
-    rail_signal_t    rail_signal; /* crossing lights, road-facing */
-    rail_signal_t    train_signal;/* train light, rail-facing     */
+    rail_signal_t    rail_signal; /* crossing lights (road side) */
+    rail_signal_t    train_signal;/* train light (rail side) */
     uint32_t         fault_flags;
-    lc_safety_view_t safety;      /* guarded by lock, written by lc_enter_step() */
+    lc_safety_view_t safety;      /* guarded by lock */
 
-    /* right-turn arrow, one per approach (auxiliary movement) */
     arrow_state_t    ns_arrow, ew_arrow;
     int              ns_arrow_ms, ew_arrow_ms;
 
-    /* event/request flags, written by other threads, consumed by Phase_Controller_Task */
+    /* Set by input threads, consumed by Phase_Controller_Task. */
     volatile int  ped_request_pending;
     volatile int  ns_vehicle_demand;
     volatile int  ew_vehicle_demand;
-    volatile int  rail_alert;      /* train approaching / present */
-    volatile int  rail_clear_req;  /* train cleared                */
+    volatile int  rail_alert;      /* train approaching or on the crossing */
+    volatile int  rail_clear_req;  /* train reported clear */
 
-    /* pending CC-originated commands, set by Central_Command_Server_Task,
-     * applied by Phase_Controller_Task at the next safe point            */
-    volatile int  override_pending;   /* 1 = an override is waiting to be applied */
-    int           override_command;   /* OVR_* value  */
+    /* Accepted CC commands, waiting for Phase_Controller_Task to apply
+     * them at the next safe point. */
+    volatile int  override_pending;
+    int           override_command;   /* OVR_* */
     uint32_t      override_seq;
 
     volatile int  mode_switch_pending;
     control_mode_t mode_switch_requested;
 
-    int   min_green_elapsed;  /* set once the current GREEN has held >= VEHICLE_MIN_GREEN_S */
+    int   min_green_elapsed;  /* current green has run at least VEHICLE_MIN_GREEN_S */
 
-    /* 'g' key: make the next boom-gate CLOSE time out. Set by the console
+    /* 'g' key: make the next boom-gate close time out. Set by the console
      * thread, consumed by Boom_Gate_Controller_Task, guarded by lock. */
     int   gate_fault_armed;
 } lc_context_t;
 
-/* The one instance. Modules take it as a parameter; this accessor exists
- * for the few threads that are handed no argument. */
 lc_context_t *lc_ctx(void);
 
 void        lc_context_init(lc_context_t *ctx, int id, const char *cc_node);
 
-/* --- step / countdown (Phase_Controller_Task only) --------------------
- * enter_step() is the single place a duration becomes a countdown, so it
- * is also the single place the A40 scale factor is applied and the one
- * hook the right-turn arrow needs to re-evaluate its permission. Pass
- * REAL-WORLD milliseconds; scaling happens inside. */
+/* Enter a step and start its countdown. Pass real-world milliseconds;
+ * this is where TIME_SCALE_FACTOR is applied. It also re-checks the
+ * right-turn arrows, so callers don't have to. Phase_Controller_Task only. */
 void        lc_enter_step(lc_context_t *ctx, lc_step_t step, int real_ms);
 void        lc_enter_step_seconds(lc_context_t *ctx, lc_step_t step, int real_s);
 lc_step_t   lc_step(const lc_context_t *ctx);
 int         lc_countdown_ms(const lc_context_t *ctx);
 const char *lc_step_name(lc_step_t step);
 
-/* --- coarse phase ----------------------------------------------------- */
 void        lc_set_phase(lc_context_t *ctx, lc_phase_t phase);
 lc_phase_t  lc_phase(lc_context_t *ctx);
 
-/* --- mode -------------------------------------------------------------- */
 void           lc_set_mode(lc_context_t *ctx, control_mode_t mode);
 control_mode_t lc_mode(lc_context_t *ctx);
 
-/* --- reported signal states (Phase_Controller_Task writes, others read
- * under lock). Setting both vehicle states in one call keeps the pair
- * consistent in a status snapshot. ---------------------------------- */
+/* Both vehicle states are set together so a status snapshot never sees
+ * half an update. */
 void        lc_set_vehicle_states(lc_context_t *ctx, vehicle_state_t ns, vehicle_state_t ew);
 void        lc_set_ped_state(lc_context_t *ctx, ped_state_t s);
 void        lc_set_gate_state(lc_context_t *ctx, gate_state_t s);
 void        lc_set_arrow_state(lc_context_t *ctx, arrow_state_t *slot, arrow_state_t s);
 
-/* --- override safety view (any thread) --------------------------------- */
+/* Safe to call from any thread. */
 lc_safety_view_t lc_safety_view(lc_context_t *ctx);
 
 /* CLOCK_MONOTONIC in milliseconds. */
 uint64_t    lc_now_ms(void);
 
-/* --- faults ------------------------------------------------------------ */
 void        lc_raise_fault(lc_context_t *ctx, int fault_code);
 void        lc_clear_fault(lc_context_t *ctx, int fault_code);
 uint32_t    lc_fault_flags(lc_context_t *ctx);
 
-/* Simulated boom-gate fault ('g' key): arm it, then the gate task takes
- * it -- returns 1 exactly once per arming, clearing it. */
+/* Simulated gate fault ('g' key). lc_take_gate_fault() returns 1 once per
+ * arming and clears it. */
 void        lc_arm_gate_fault(lc_context_t *ctx);
 int         lc_take_gate_fault(lc_context_t *ctx);
 
-/* --- display helpers shared by several modules ------------------------- */
 const char *lc_vehicle_name(vehicle_state_t s);
 const char *lc_ped_name(ped_state_t s);
 const char *lc_rail_name(rail_signal_t s);
@@ -183,7 +166,7 @@ const char *lc_arrow_name(arrow_state_t s);
 const char *lc_gate_name(gate_state_t s);
 const char *lc_mode_name(control_mode_t m);
 
-/* Scaled sleep, for the two tasks that simulate mechanical/hardware time. */
+/* Scaled sleep, for the tasks that simulate hardware travel time. */
 void        lc_delay_real_ms(int real_ms);
 
 #endif /* LC_CONTEXT_H */

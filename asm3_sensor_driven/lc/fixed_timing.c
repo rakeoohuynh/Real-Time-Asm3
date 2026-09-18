@@ -1,6 +1,6 @@
-/* =====================================================================
- * fixed_timing.c -- NS/EW vehicle cycling.
- * ===================================================================== */
+/*
+ * fixed_timing.c -- the NS/EW vehicle cycle.
+ */
 #include <stdio.h>
 #include "fixed_timing.h"
 #include "signal_output.h"
@@ -83,8 +83,8 @@ int fixed_timing_advance(lc_context_t *ctx)
         return 1;
 
     case STEP_FAILSAFE:
-        /* stay in FAILSAFE until an operator/CC action clears the fault; PoC just
-         * keeps re-arming a short countdown so the loop remains responsive. */
+        /* Nothing enters or leaves FAILSAFE yet. If something does enter
+         * it, stay there and keep re-arming a short countdown. */
         lc_enter_step(ctx, STEP_FAILSAFE, 1000);
         return 1;
 

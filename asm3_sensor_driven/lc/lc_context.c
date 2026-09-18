@@ -1,6 +1,6 @@
-/* =====================================================================
+/*
  * lc_context.c -- the shared LC state and its accessors.
- * ===================================================================== */
+ */
 #include <string.h>
 #include <time.h>
 #include "lc_context.h"
@@ -32,16 +32,15 @@ void lc_context_init(lc_context_t *ctx, int id, const char *cc_node)
     pthread_mutex_init(&ctx->lock, NULL);
 }
 
-/* --- step / countdown --------------------------------------------------
- * A40: the ONE place a real-world duration becomes a countdown, and so
- * the one place TIME_SCALE_FACTOR is applied to control timing. */
+/* Every control countdown starts here, so this is the only place
+ * TIME_SCALE_FACTOR touches control timing. */
 void lc_enter_step(lc_context_t *ctx, lc_step_t step, int real_ms)
 {
     ctx->step         = step;
     ctx->countdown_ms = SCALE_MS(real_ms);
 
-    /* Publish the override-safety view, so Central_Command_Server_Task
-     * never has to read step/countdown_ms, which are written lock-free. */
+    /* Publish what the command server needs, so it never reads step or
+     * countdown_ms, which aren't locked. */
     lc_safety_view_t view;
     view.rail_active  = railway_is_active(ctx);
     view.ped_crossing = (step == STEP_PED_WALK || step == STEP_PED_CLEARANCE);
@@ -91,7 +90,6 @@ const char *lc_step_name(lc_step_t step)
     }
 }
 
-/* --- coarse phase ------------------------------------------------------ */
 void lc_set_phase(lc_context_t *ctx, lc_phase_t phase)
 {
     pthread_mutex_lock(&ctx->lock);
@@ -107,7 +105,6 @@ lc_phase_t lc_phase(lc_context_t *ctx)
     return p;
 }
 
-/* --- mode --------------------------------------------------------------- */
 void lc_set_mode(lc_context_t *ctx, control_mode_t mode)
 {
     pthread_mutex_lock(&ctx->lock);
@@ -123,7 +120,6 @@ control_mode_t lc_mode(lc_context_t *ctx)
     return m;
 }
 
-/* --- reported signal states ---------------------------------------------- */
 void lc_set_vehicle_states(lc_context_t *ctx, vehicle_state_t ns, vehicle_state_t ew)
 {
     pthread_mutex_lock(&ctx->lock);
@@ -153,7 +149,6 @@ void lc_set_arrow_state(lc_context_t *ctx, arrow_state_t *slot, arrow_state_t s)
     pthread_mutex_unlock(&ctx->lock);
 }
 
-/* --- override safety view ----------------------------------------------- */
 lc_safety_view_t lc_safety_view(lc_context_t *ctx)
 {
     pthread_mutex_lock(&ctx->lock);
@@ -169,7 +164,6 @@ uint64_t lc_now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000L);
 }
 
-/* --- faults ------------------------------------------------------------- */
 void lc_raise_fault(lc_context_t *ctx, int fault_code)
 {
     pthread_mutex_lock(&ctx->lock);
@@ -208,7 +202,6 @@ uint32_t lc_fault_flags(lc_context_t *ctx)
     return f;
 }
 
-/* --- names -------------------------------------------------------------- */
 const char *lc_vehicle_name(vehicle_state_t s)
 {
     switch (s) { case V_RED: return "RED"; case V_YELLOW: return "YELLOW"; default: return "GREEN"; }
@@ -240,7 +233,6 @@ const char *lc_mode_name(control_mode_t m)
     switch (m) { case MODE_FIXED_TIMING: return "FIXED"; case MODE_SENSOR_DRIVEN: return "SENSOR"; default: return "ADVANCED"; }
 }
 
-/* --- scaled sleep ------------------------------------------------------- */
 void lc_delay_real_ms(int real_ms)
 {
     int ms = SCALE_MS(real_ms);

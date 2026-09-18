@@ -1,17 +1,16 @@
-/* =====================================================================
+/*
  * status_report.c -- Status_Reporting_Task.
  *
- * Reports are coalesced rather than queued one per pulse: every pending
- * STATUS_EVENT pulse collapses into "send the current state once", so a
- * link outage never leaves a backlog of stale snapshots to replay. A
- * FAULT_ALARM is never coalesced away -- each distinct fault is kept
- * until it has been delivered, and faults are always sent first.
+ * Status events are coalesced: however many arrive, the CC gets one
+ * snapshot of the current state, so an outage doesn't leave a backlog of
+ * stale reports to replay. Fault alarms are never dropped this way; each
+ * distinct fault is kept until delivered, and faults go out first.
  *
- * Nothing here sleeps. Retry and back-off (UC-08) are deadlines that the
- * receive loop waits on, so pulses keep being absorbed during an outage,
- * and every send is bounded by a kernel timeout so a CC that is alive
- * but not replying cannot stall reporting.
- * ===================================================================== */
+ * Nothing here sleeps. Retry and back-off (UC-08) are deadlines the
+ * receive loop waits on, so pulses are still drained during an outage.
+ * Every send has a kernel timeout, so a CC that's up but not replying
+ * can't stall reporting.
+ */
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -21,16 +20,16 @@
 #include <sys/dispatch.h>
 #include "status_report.h"
 
-#define STATUS_SEND_TIMEOUT_MS   500    /* bound on one MsgSend to the CC       */
-#define STATUS_RESEND_GAP_MS    1000    /* between failed sends, under MaxTry   */
+#define STATUS_SEND_TIMEOUT_MS   500    /* max time for one send to the CC */
+#define STATUS_RESEND_GAP_MS    1000    /* gap between retries before the back-off */
 #define FAULT_QUEUE_LEN            8
 
-static int      g_cc_coid         = -1;   /* connection to CC, owned by this task */
+static int      g_cc_coid         = -1;
 static int      g_central_link_up = 0;
 static int      g_retry_counter   = 0;
-static uint64_t g_next_attempt_ms = 0;    /* no send/reconnect before this        */
+static uint64_t g_next_attempt_ms = 0;    /* no send or reconnect before this */
 
-static int      g_status_dirty    = 0;    /* a state change not yet reported      */
+static int      g_status_dirty    = 0;    /* state changed since the last report */
 static struct { int code, head; } g_faults[FAULT_QUEUE_LEN];
 static int      g_fault_count     = 0;
 
@@ -42,7 +41,7 @@ static int connect_to_cc(lc_context_t *ctx)
     else
         snprintf(path, sizeof(path), "/dev/name/local/%s", CC_CHANNEL_NAME);
 
-    return name_open(path, 0);   /* -1 on failure, errno set */
+    return name_open(path, 0);
 }
 
 static int report_pending(void)
@@ -50,27 +49,25 @@ static int report_pending(void)
     return g_status_dirty || g_fault_count > 0;
 }
 
-/* ---------------------------------------------------------------------
- * Receive one pulse, waiting at most timeout_ms (-1 = no limit). Returns
- * 1 with *pulse filled, or 0 on timeout/anything that is not a pulse.
- * ------------------------------------------------------------------- */
+/* Waits up to timeout_ms (-1 = forever) for a pulse. Returns 1 if one
+ * arrived, 0 on timeout or anything else. */
 static int receive_pulse(lc_context_t *ctx, long timeout_ms, struct _pulse *pulse)
 {
     if (timeout_ms >= 0) {
-        /* A 0 ms poll is armed as 1 ns: it expires at once either way,
-         * without depending on how a zero timeout is interpreted. */
+        /* Arm a 0 ms poll as 1 ns so it doesn't rely on how the kernel
+         * treats a zero timeout. */
         uint64_t ns = (timeout_ms > 0) ? (uint64_t)timeout_ms * 1000000ULL : 1;
         TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_RECEIVE, NULL, &ns, NULL);
     }
     int rcvid = MsgReceive(ctx->status_chid, pulse, sizeof(*pulse), NULL);
     if (rcvid == 0) return 1;
-    if (rcvid > 0) MsgError(rcvid, ENOSYS);   /* only pulses expected on this channel */
+    if (rcvid > 0) MsgError(rcvid, ENOSYS);   /* this channel only takes pulses */
     return 0;
 }
 
 static void absorb_pulse(lc_context_t *ctx, const struct _pulse *pulse)
 {
-    if (pulse->code != PULSE_FAULT_ALARM) {   /* PULSE_STATUS_EVENT */
+    if (pulse->code != PULSE_FAULT_ALARM) {
         g_status_dirty = 1;
         return;
     }
@@ -84,8 +81,8 @@ static void absorb_pulse(lc_context_t *ctx, const struct _pulse *pulse)
         if (g_faults[i].code == code && g_faults[i].head == head) return;   /* already queued */
 
     if (g_fault_count == FAULT_QUEUE_LEN) {
-        printf("[I%d][Status_Reporting_Task] fault queue full, FAULT_ALARM code=%d head=%d not queued "
-               "(still visible in fault_flags)\n", ctx->id, code, head);
+        printf("[I%d][Status_Reporting_Task] fault queue full, FAULT_ALARM code=%d head=%d dropped "
+               "(the fault still shows in fault_flags)\n", ctx->id, code, head);
         fflush(stdout);
         return;
     }
@@ -113,11 +110,10 @@ static void fill_snapshot(lc_context_t *ctx, net_report_t *rep)
     rep->timestamp   = time(NULL);
 }
 
-/* ---------------------------------------------------------------------
- * One bounded send. Returns 1 on success. On failure applies UC-08:
- * retry after a short gap up to STATUS_MAX_RETRY, then declare the link
- * lost, drop the connection and back off STATUS_RETRY_DELAY_S.
- * ------------------------------------------------------------------- */
+/* Sends one report with a timeout. Returns 1 on success. On failure
+ * (UC-08): retry after a short gap up to STATUS_MAX_RETRY times, then
+ * mark the link lost, drop the connection and back off for
+ * STATUS_RETRY_DELAY_S. */
 static int send_report(lc_context_t *ctx, net_report_t *rep)
 {
     net_reply_t reply;
@@ -126,7 +122,7 @@ static int send_report(lc_context_t *ctx, net_report_t *rep)
 
     if (MsgSend(g_cc_coid, rep, sizeof(*rep), &reply, sizeof(reply)) != -1) {
         if (!g_central_link_up) {
-            printf("[I%d][Status_Reporting_Task] link to CC RESTORED\n", ctx->id);
+            printf("[I%d][Status_Reporting_Task] link to CC up\n", ctx->id);
             fflush(stdout);
         }
         g_central_link_up = 1;
@@ -144,7 +140,7 @@ static int send_report(lc_context_t *ctx, net_report_t *rep)
         g_next_attempt_ms = lc_now_ms() + STATUS_RESEND_GAP_MS;
     } else {
         if (g_central_link_up)
-            printf("[I%d][Status_Reporting_Task] central_link = LOST -- continuing autonomously\n", ctx->id);
+            printf("[I%d][Status_Reporting_Task] link to CC LOST -- running on our own, will keep retrying\n", ctx->id);
         g_central_link_up = 0;
         g_retry_counter = 0;
         name_close(g_cc_coid);
@@ -155,8 +151,8 @@ static int send_report(lc_context_t *ctx, net_report_t *rep)
     return 0;
 }
 
-/* Deliver everything pending: faults first, then one current-state report.
- * Stops at the first failure, leaving the rest pending for the next try. */
+/* Sends faults first, then one current-state report. Stops at the first
+ * failure and leaves the rest for the next attempt. */
 static void flush_reports(lc_context_t *ctx)
 {
     if (g_cc_coid < 0) {
@@ -165,7 +161,7 @@ static void flush_reports(lc_context_t *ctx)
             g_next_attempt_ms = lc_now_ms() + (uint64_t)STATUS_RETRY_DELAY_S * 1000u;
             return;
         }
-        g_status_dirty = 1;   /* UC-08: resync with the current state, not the missed reports */
+        g_status_dirty = 1;   /* after reconnecting, send the current state (UC-08) */
     }
 
     net_report_t rep;
@@ -193,7 +189,7 @@ void *status_reporting_task(void *arg)
     lc_context_t *ctx = arg;
     g_cc_coid = connect_to_cc(ctx);
     if (g_cc_coid < 0) {
-        printf("[I%d][Status_Reporting_Task] CC not reachable yet, will retry in background\n", ctx->id);
+        printf("[I%d][Status_Reporting_Task] CC not reachable yet, will keep retrying\n", ctx->id);
         fflush(stdout);
         g_next_attempt_ms = lc_now_ms() + (uint64_t)STATUS_RETRY_DELAY_S * 1000u;
     }
@@ -201,8 +197,8 @@ void *status_reporting_task(void *arg)
     for (;;) {
         struct _pulse pulse;
 
-        /* Nothing pending: wait for a pulse. Something pending: wait only
-         * until the next send/reconnect attempt is due. */
+        /* With something pending, only wait until the next send attempt
+         * is due. */
         long timeout_ms = -1;
         if (report_pending()) {
             uint64_t now = lc_now_ms();
@@ -211,7 +207,7 @@ void *status_reporting_task(void *arg)
         if (timeout_ms != 0 && receive_pulse(ctx, timeout_ms, &pulse))
             absorb_pulse(ctx, &pulse);
 
-        /* Drain whatever else queued up, so it coalesces into one send. */
+        /* Drain the rest so it all goes out as one report. */
         while (receive_pulse(ctx, 0, &pulse))
             absorb_pulse(ctx, &pulse);
 
@@ -226,13 +222,11 @@ void notify_status(lc_context_t *ctx, int is_fault, int fault_code, int head_id)
     int code = is_fault ? PULSE_FAULT_ALARM : PULSE_STATUS_EVENT;
     int val  = is_fault ? ((fault_code & 0xFF) | ((head_id & 0xFF) << 8)) : 0;
 
-    /* Check the kernel-level return here, at the call site. A dead
-     * Status_Reporting_Task channel returns -1/ESRCH, and silently
-     * dropping the report would leave the controller believing the CC
-     * had been told. */
+    /* If Status_Reporting_Task is gone this fails with ESRCH. Log it
+     * rather than let the report vanish silently. */
     if (MsgSendPulse(ctx->coid_status, SIGEV_PULSE_PRIO_INHERIT, code, val) == -1) {
-        printf("[I%d][Phase_Controller_Task] STATUS pulse failed (errno=%d%s) -- report dropped\n",
-               ctx->id, errno, (errno == ESRCH) ? ": ESRCH, Status_Reporting_Task gone" : "");
+        printf("[I%d][Phase_Controller_Task] could not queue report (errno=%d%s) -- report dropped\n",
+               ctx->id, errno, (errno == ESRCH) ? ", Status_Reporting_Task is gone" : "");
         fflush(stdout);
     }
 }
@@ -240,14 +234,14 @@ void notify_status(lc_context_t *ctx, int is_fault, int fault_code, int head_id)
 void probe_cc_connectivity(lc_context_t *ctx)
 {
     const char *target = ctx->cc_node[0] ? ctx->cc_node : "<same node>";
-    printf("[I%d] checking connectivity to CC (target node: %s) ...\n", ctx->id, target);
+    printf("[I%d] checking connection to CC (node: %s) ...\n", ctx->id, target);
     fflush(stdout);
 
     const int max_attempts = 5;
     for (int attempt = 1; attempt <= max_attempts; attempt++) {
         int probe = connect_to_cc(ctx);
         if (probe >= 0) {
-            printf("[I%d] CC REACHABLE (attempt %d/%d) -- channel '%s' resolved OK over %s\n",
+            printf("[I%d] CC REACHABLE (attempt %d/%d) -- opened channel '%s' over %s\n",
                    ctx->id, attempt, max_attempts, CC_CHANNEL_NAME,
                    ctx->cc_node[0] ? "QNET" : "same node");
             fflush(stdout);
@@ -261,10 +255,10 @@ void probe_cc_connectivity(lc_context_t *ctx)
     }
 
     printf("[I%d] *** CC NOT REACHABLE after %d attempts ***\n"
-           "     Check: CC process running? Same WiFi/subnet? QNET (io-pkt + npm-qnet.so)\n"
-           "     mounted on both machines? Node name '%s' correct (try `ls /net/%s/dev/name/local/`\n"
-           "     from a shell on this machine)? -- LC will still start and operate autonomously;\n"
-           "     Status_Reporting_Task keeps retrying in the background (UC-08).\n",
+           "     Check that the CC is running, both machines are on the same network,\n"
+           "     QNET (lsm-qnet.so) is running on both, and the node name '%s' is right:\n"
+           "     `ls /net/%s/dev/name/local/` on this machine should list the CC's channel.\n"
+           "     The LC starts anyway and keeps trying to reach the CC in the background.\n",
            ctx->id, max_attempts, target, target);
     fflush(stdout);
 }

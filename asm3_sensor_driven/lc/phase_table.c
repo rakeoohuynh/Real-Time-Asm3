@@ -1,24 +1,20 @@
-/* =====================================================================
+/*
  * phase_table.c
  *
- * Vietnamese-style right-turn arrangement (right-hand traffic): a right
- * turn leaves the intersection into the nearest lane and conflicts with
- * the through movement it merges into far less than it conflicts with
- * pedestrians on the receiving leg. So the arrow for an approach may run
- * while that approach's own main signal is RED -- which is precisely the
- * "green arrow against a red main signal" case the design calls for --
- * but never while pedestrians are being served, never during railway
- * protection, and never in a fault or override state.
- * ===================================================================== */
+ * Traffic drives on the right. A right turn goes into the nearest lane,
+ * so it barely conflicts with the other road's through traffic; its real
+ * conflict is with pedestrians crossing the road it turns into. That's
+ * why an approach's arrow can run while its own main signal is red, but
+ * never during a pedestrian crossing, railway protection, an override or
+ * a fault.
+ */
 #include <stdio.h>
 #include "phase_table.h"
 
 static const uint32_t g_phase_table[STEP__COUNT] = {
-    /* NS has right of way: NS through runs, and BOTH right-turn arrows
-     * may run -- the EW arrow against EW's own RED main signal. */
+    /* Both arrows run during either green, including the one facing red. */
     [STEP_NS_GREEN]        = MOVE_NS_THROUGH | MOVE_NS_RIGHT | MOVE_EW_RIGHT,
-    /* Clearing: the through movement is still emptying the box, so no
-     * new auxiliary movement is released into it. */
+    /* Traffic is still clearing the box; don't release anything new. */
     [STEP_NS_YELLOW]       = MOVE_NS_THROUGH,
     [STEP_NS_ALLRED]       = 0,
 
@@ -26,13 +22,12 @@ static const uint32_t g_phase_table[STEP__COUNT] = {
     [STEP_EW_YELLOW]       = MOVE_EW_THROUGH,
     [STEP_EW_ALLRED]       = 0,
 
-    /* Pedestrian service: every vehicle movement, arrows included,
-     * is withheld. */
     [STEP_PED_WALK]        = MOVE_PED,
     [STEP_PED_CLEARANCE]   = MOVE_PED,
 
-    /* Railway protection outranks everything (A44). */
-    [STEP_RAIL_YELLOW]     = MOVE_NS_THROUGH | MOVE_EW_THROUGH, /* clearing only */
+    /* Both roads show yellow only to clear the intersection; nothing
+     * moves after that until the crossing reopens (A44). */
+    [STEP_RAIL_YELLOW]     = MOVE_NS_THROUGH | MOVE_EW_THROUGH,
     [STEP_RAIL_ALLRED]     = 0,
     [STEP_RAIL_PREARRIVAL] = 0,
     [STEP_RAIL_WARN]       = 0,
@@ -42,9 +37,7 @@ static const uint32_t g_phase_table[STEP__COUNT] = {
     [STEP_RAIL_POST_HOLD]  = 0,
     [STEP_RAIL_GATE_RAISE] = 0,
 
-    /* A CC override drives the main signals explicitly; auxiliary
-     * movements stay withheld so the override means exactly what the
-     * operator asked for and nothing more. */
+    /* An override shows exactly what the operator asked for, no arrows. */
     [STEP_OVERRIDE_HOLD]   = 0,
     [STEP_FAILSAFE]        = 0
 };

@@ -1,14 +1,12 @@
-/* =====================================================================
+/*
  * central_command_server.h -- Central_Command_Server_Task.
  *
- * Receives OVERRIDE_COMMAND / MODE_SWITCH from the CC on the LC's
- * named channel with a blocking MsgReceive(), runs the LC-side safety
- * check, and replies. An accepted command is parked and applied by
- * Phase_Controller_Task at the next safe point, where the safety
- * condition is checked a SECOND time -- railway protection can begin
- * in the gap between acceptance and application, and it outranks any
- * CC command.
- * ===================================================================== */
+ * Receives OVERRIDE_COMMAND and MODE_SWITCH from the CC, checks whether
+ * an override is safe right now, and replies. Accepted commands are
+ * applied later by Phase_Controller_Task, which checks safety again:
+ * railway protection can start between acceptance and application, and
+ * it always wins over a CC command.
+ */
 #ifndef CENTRAL_COMMAND_SERVER_H
 #define CENTRAL_COMMAND_SERVER_H
 
@@ -16,7 +14,7 @@
 
 void *central_command_server_task(void *arg);
 
-/* Phase_Controller_Task: apply whatever the server accepted. */
+/* Phase_Controller_Task: applies whatever the server accepted. */
 void  apply_pending_cc_commands(lc_context_t *ctx);
 
 #endif /* CENTRAL_COMMAND_SERVER_H */

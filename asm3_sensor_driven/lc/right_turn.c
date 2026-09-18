@@ -1,12 +1,12 @@
-/* =====================================================================
- * right_turn.c -- right-turn arrow control.
- * ===================================================================== */
+/*
+ * right_turn.c -- right-turn arrows.
+ */
 #include <stdio.h>
 #include "right_turn.h"
 #include "phase_table.h"
 #include "signal_output.h"
 
-/* One approach's worth of arrow, so the two are handled identically. */
+/* Lets the NS and EW arrows share the same code. */
 typedef struct {
     movement_t     movement;
     int            head_id;
@@ -80,9 +80,8 @@ void right_turn_on_step_change(lc_context_t *ctx)
         } else if (*a[i].state == ARROW_OFF) {
             arrow_start(ctx, &a[i]);
         }
-        /* Already green and still permitted: let its interval run on
-         * rather than restarting it, so the configured interval means
-         * what it says. */
+        /* Already green and still allowed: don't restart the interval,
+         * or the arrow could stay green longer than RIGHT_TURN_ARROW_S. */
     }
 }
 
@@ -95,15 +94,15 @@ void right_turn_tick(lc_context_t *ctx, int tick_ms)
     for (int i = 0; i < 2; i++) {
         if (*a[i].state != ARROW_GREEN) continue;
 
-        /* A higher-priority condition may have taken the step away from
-         * under a running arrow; withdraw it before ageing it. */
+        /* The step may have changed under a running arrow; turn it off
+         * before counting it down. */
         if (!phase_table_allows(step, a[i].movement)) {
             arrow_stop(ctx, &a[i], "movement no longer permitted");
             continue;
         }
         *a[i].remaining_ms -= tick_ms;
         if (*a[i].remaining_ms <= 0)
-            arrow_stop(ctx, &a[i], "configured interval ended");
+            arrow_stop(ctx, &a[i], "interval ended");
     }
 }
 

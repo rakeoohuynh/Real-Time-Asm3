@@ -1,6 +1,6 @@
-/* =====================================================================
- * railway_protection.c -- UC-05 railway crossing protection.
- * ===================================================================== */
+/*
+ * railway_protection.c -- railway crossing protection (UC-05).
+ */
 #include <stdio.h>
 #include <sys/neutrino.h>
 #include "railway_protection.h"
@@ -10,16 +10,12 @@
 #include "fixed_timing.h"
 #include "right_turn.h"
 
-/* How long a step waits for a GATE_STATUS pulse that has not arrived by
- * the time its nominal interval ended. */
+/* If a gate step's nominal time is up but GATE_STATUS hasn't arrived,
+ * keep waiting in slices of this long. */
 #define GATE_WAIT_REARM_MS   1000
 
-/* ==========================================================
- * Railway_Signal_Output_Task
- *   Owns rail_chid. Drives both line-side outputs: the crossing
- *   lights that face the road, and the train light that faces the
- *   train and is what flags a gate fault to it.
- * ========================================================== */
+/* Railway_Signal_Output_Task: drives the crossing lights (road side) and
+ * the train light (rail side). */
 void *railway_signal_task(void *arg)
 {
     lc_context_t *ctx = arg;
@@ -35,7 +31,7 @@ void *railway_signal_task(void *arg)
                                         ? "train light" : "crossing lights";
                 printf("[I%d][Railway_Signal_Output_Task] %s (signal %d) -> %s\n",
                        ctx->id, which, msg.body.set_rail.signal_id,
-                       lc_rail_name(msg.body.set_rail.colour));
+                       lc_rail_name(msg.body.set_rail.color));
                 fflush(stdout);
             }
         } else {
@@ -46,12 +42,12 @@ void *railway_signal_task(void *arg)
     return NULL;
 }
 
-static int send_rail(lc_context_t *ctx, int signal_id, rail_signal_t colour)
+static int send_rail(lc_context_t *ctx, int signal_id, rail_signal_t color)
 {
     local_msg_t m; local_reply_t r;
     m.type = MSG_SET_RAILWAY_SIGNAL;
     m.body.set_rail.signal_id = signal_id;
-    m.body.set_rail.colour    = colour;
+    m.body.set_rail.color     = color;
     if (MsgSend(ctx->coid_rail, &m, sizeof(m), &r, sizeof(r)) == -1) return FAULT_CONFIG;
     return r.result;
 }
@@ -68,9 +64,6 @@ static void set_train_light(lc_context_t *ctx, rail_signal_t c)
     send_rail(ctx, RAIL_SIGNAL_TRAIN, c);
 }
 
-/* ==========================================================
- * Train_Sensor_Task
- * ========================================================== */
 void train_sensor_handle_approach(lc_context_t *ctx)
 {
     ctx->rail_alert = 1;
@@ -92,9 +85,8 @@ int railway_is_active(lc_context_t *ctx)
     return (ctx->step >= STEP_RAIL_YELLOW && ctx->step <= STEP_RAIL_GATE_RAISE);
 }
 
-/* The nominal sequence, in order, with the countdown each step is entered
- * with in railway_advance(). STEP_RAIL_GATE_FAULT is not part of the
- * nominal path and is handled separately below. */
+/* Nominal steps in order, with the duration railway_advance() gives each.
+ * STEP_RAIL_GATE_FAULT is off the normal path and handled separately. */
 static const struct { lc_step_t step; int real_s; } k_rail_sequence[] = {
     { STEP_RAIL_YELLOW,     VEHICLE_YELLOW_S        },
     { STEP_RAIL_ALLRED,     VEHICLE_ALL_RED_S       },
@@ -110,8 +102,8 @@ int railway_remaining_ms(lc_context_t *ctx)
 {
     if (!railway_is_active(ctx)) return 0;
 
-    /* A gate-fault retry is followed by a fresh lowering, so count the
-     * rest of the sequence as if the warning flash had just ended. */
+    /* After a gate fault the gate lowers again, so count the rest as if
+     * the warning had just ended. */
     lc_step_t after = (ctx->step == STEP_RAIL_GATE_FAULT) ? STEP_RAIL_WARN : ctx->step;
 
     int total = ctx->countdown_ms;
@@ -123,19 +115,14 @@ int railway_remaining_ms(lc_context_t *ctx)
     return total;
 }
 
-/* ==========================================================
- * The sequence
- * ========================================================== */
 void railway_begin_protection(lc_context_t *ctx)
 {
     printf("[I%d][Phase_Controller_Task] railway protection ACTIVATED "
-           "(A44 priority preemption; %ds pre-arrival, %ds total closure)\n",
+           "(train due in %ds, crossing closed for %ds)\n",
            ctx->id, RAIL_PROTECT_LEAD_S, RAIL_TOTAL_CLOSURE_S);
     fflush(stdout);
 
-    /* Withdraw the auxiliary movements before anything else: railway
-     * protection outranks them and they must not survive the preemption
-     * even for one tick. */
+    /* Arrows go first so none of them is still green on the next tick. */
     right_turn_force_off(ctx, "railway protection");
 
     lc_set_vehicle_states(ctx, V_YELLOW, V_YELLOW);
@@ -151,22 +138,22 @@ void railway_begin_protection(lc_context_t *ctx)
 void railway_handle_cleared(lc_context_t *ctx)
 {
     ctx->rail_clear_req = 1;
-    /* The train is off the crossing early: end the occupation now and
-     * start the post-train hold. */
+    /* Train cleared early: cut the occupied step short and move on to
+     * the post-train hold. */
     if (ctx->step == STEP_RAIL_OCCUPIED)
         ctx->countdown_ms = 0;
 }
 
 static void enter_gate_fault(lc_context_t *ctx, int exhausted)
 {
-    /* Crossing lights keep flashing, the train light goes red to flag
-     * the gate problem to the train, and the control room is told. */
+    /* Keep the crossing lights flashing, stop the train with a red train
+     * light, and alert the CC. */
     set_crossing_lights(ctx, R_FLASHING_RED);
     set_train_light(ctx, R_RED);
     lc_raise_fault(ctx, FAULT_BOOM_GATE);
 
     printf("[I%d][Phase_Controller_Task] BOOM GATE FAULT after attempt %d/%d%s "
-           "-- crossing lights still flashing, train light RED, distress to CC\n",
+           "-- crossing lights still flashing, train light RED, FAULT_ALARM sent to CC\n",
            ctx->id, boom_gate_attempts_used(), GATE_CLOSE_MAX_ATTEMPTS,
            exhausted ? " (attempts exhausted, escalating)" : "");
     fflush(stdout);
@@ -188,18 +175,17 @@ int railway_advance(lc_context_t *ctx)
         return 1;
 
     case STEP_RAIL_ALLRED:
-        /* Railway-protection RED is now established for the whole
-         * remainder of the pre-arrival window. */
-        printf("[I%d][Phase_Controller_Task] railway protection RED established, "
-               "%ds until the warning flash\n", ctx->id, RAIL_PREARRIVAL_QUIET_S);
+        /* All red from here until the gate reopens. */
+        printf("[I%d][Phase_Controller_Task] intersection held at all red, "
+               "%ds until the crossing warning\n", ctx->id, RAIL_PREARRIVAL_QUIET_S);
         fflush(stdout);
         lc_enter_step_seconds(ctx, STEP_RAIL_PREARRIVAL, RAIL_PREARRIVAL_QUIET_S);
         return 1;
 
     case STEP_RAIL_PREARRIVAL:
         set_crossing_lights(ctx, R_FLASHING_RED);
-        printf("[I%d][Phase_Controller_Task] crossing warning flashing, "
-               "gate lowering begins in %ds (A15)\n", ctx->id, RAIL_WARNING_LEAD_S);
+        printf("[I%d][Phase_Controller_Task] crossing lights flashing, "
+               "gate starts lowering in %ds\n", ctx->id, RAIL_WARNING_LEAD_S);
         fflush(stdout);
         lc_enter_step_seconds(ctx, STEP_RAIL_WARN, RAIL_WARNING_LEAD_S);
         notify_status(ctx, 0, 0, 0);
@@ -212,8 +198,7 @@ int railway_advance(lc_context_t *ctx)
         return 1;
 
     case STEP_RAIL_GATE_LOWER:
-        /* The nominal lowering interval has elapsed but GATE_STATUS has
-         * not arrived yet; keep waiting a tick at a time. */
+        /* Lowering time is up but GATE_STATUS hasn't arrived; keep waiting. */
         lc_enter_step(ctx, STEP_RAIL_GATE_LOWER, GATE_WAIT_REARM_MS * TIME_SCALE_FACTOR);
         return 1;
 
@@ -221,8 +206,8 @@ int railway_advance(lc_context_t *ctx)
         if (boom_gate_attempts_used() < GATE_CLOSE_MAX_ATTEMPTS) {
             boom_gate_retry_close(ctx);
         } else {
-            printf("[I%d][Phase_Controller_Task] gate still not locked; "
-                   "starting a fresh close episode (crossing stays closed)\n", ctx->id);
+            printf("[I%d][Phase_Controller_Task] gate still not locked after %d attempts; "
+                   "starting over (crossing stays closed)\n", ctx->id, GATE_CLOSE_MAX_ATTEMPTS);
             fflush(stdout);
             boom_gate_begin_close(ctx);
         }
@@ -231,7 +216,7 @@ int railway_advance(lc_context_t *ctx)
 
     case STEP_RAIL_OCCUPIED:
         printf("[I%d][Phase_Controller_Task] train clear of the crossing, "
-               "holding the gate down %ds (A17)\n", ctx->id, RAIL_POST_TRAIN_HOLD_S);
+               "holding the gate down for %ds\n", ctx->id, RAIL_POST_TRAIN_HOLD_S);
         fflush(stdout);
         lc_enter_step_seconds(ctx, STEP_RAIL_POST_HOLD, RAIL_POST_TRAIN_HOLD_S);
         notify_status(ctx, 0, 0, 0);
@@ -243,7 +228,7 @@ int railway_advance(lc_context_t *ctx)
         return 1;
 
     case STEP_RAIL_GATE_RAISE:
-        /* Waiting on the gate's OPENED status. */
+        /* Still waiting for the gate to report open. */
         lc_enter_step(ctx, STEP_RAIL_GATE_RAISE, GATE_WAIT_REARM_MS * TIME_SCALE_FACTOR);
         return 1;
 
@@ -260,10 +245,10 @@ void railway_on_gate_status(lc_context_t *ctx, int pulse_value)
 
     case GATE_EVT_LOCKED:
         if (ctx->step != STEP_RAIL_GATE_LOWER && ctx->step != STEP_RAIL_GATE_FAULT)
-            return;   /* stale status from a previous episode */
+            return;   /* late status from an earlier close sequence */
         set_crossing_lights(ctx, R_FLASHING_RED);
-        set_train_light(ctx, R_CLEAR);   /* gate is down: the train may run */
-        printf("[I%d][Phase_Controller_Task] gate LOCKED, crossing occupied for %ds (A18)\n",
+        set_train_light(ctx, R_CLEAR);   /* gate is down, so the train may proceed */
+        printf("[I%d][Phase_Controller_Task] gate LOCKED, train on the crossing for %ds\n",
                ctx->id, RAIL_TRAIN_OCCUPY_S);
         fflush(stdout);
         lc_enter_step_seconds(ctx, STEP_RAIL_OCCUPIED, RAIL_TRAIN_OCCUPY_S);

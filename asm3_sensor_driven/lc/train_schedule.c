@@ -1,17 +1,12 @@
-/* =====================================================================
- * train_schedule.c -- deterministic, timetable-driven train events.
+/*
+ * train_schedule.c -- trains from a fixed timetable.
  *
- * NOTE ON THE REPORT'S PHYSICAL VALUES
- *   The report gives a train velocity of 30 m/s and a sensor-to-gate
- *   distance of 1000 m, which puts the train at the gate 33.3s after
- *   the sensor trips -- not 50s, and the sensor-to-light distance of
- *   500 m puts it at the train light after 16.7s. Those figures cannot
- *   both hold with the stated 50s pre-arrival protection window. The
- *   50s window is treated as authoritative for sequencing, because it
- *   is the value the closure budget (50 + 25 + 5 = 80s) is built from;
- *   the distances are carried as constants and reported in the log so
- *   the discrepancy stays visible rather than being quietly resolved.
- * ===================================================================== */
+ * The train figures don't agree with each other: at 30 m/s, a sensor
+ * 1000 m from the gate gives 33.3s of warning, not the 50s lead
+ * (and the train reaches the light, 500 m out, after 16.7s). Sequencing
+ * uses the 50s lead, since the 80s closure (50 + 25 + 5) is built on it.
+ * The distances are only printed, so the mismatch stays visible.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,12 +19,10 @@
 #define SCHEDULE_HORIZON_S     (24 * 3600)
 #define SCHED_POLL_MS          100
 
-/* One scheduled arrival, expressed in simulated seconds since the
- * simulated clock was seeded. */
 typedef struct {
-    int  at_s;          /* simulated seconds from start */
-    int  sod;           /* seconds-of-day of the arrival, for display */
-    int  wday;          /* 0=Sun .. 6=Sat                             */
+    int  at_s;          /* arrival, simulated seconds after the clock started */
+    int  sod;           /* arrival time of day, for display */
+    int  wday;          /* 0 = Sun .. 6 = Sat */
     service_period_t period;
 } train_event_t;
 
@@ -40,8 +33,6 @@ static struct timespec g_real_start;
 static int             g_start_sod  = 0;
 static int             g_start_wday = 0;
 
-/* ---------------------------------------------------------------- clock */
-
 static long real_elapsed_ms(void)
 {
     struct timespec now;
@@ -50,7 +41,7 @@ static long real_elapsed_ms(void)
          + (now.tv_nsec - g_real_start.tv_nsec) / 1000000L;
 }
 
-/* Simulated seconds elapsed since the clock was seeded. */
+/* Simulated seconds since the clock started. */
 static int sim_elapsed_s(void)
 {
     return (int)((real_elapsed_ms() * TIME_SCALE_FACTOR) / 1000L);
@@ -76,8 +67,6 @@ void train_schedule_init(int start_sod)
         g_start_sod = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec;
     }
 }
-
-/* ---------------------------------------------------------------- periods */
 
 service_period_t train_schedule_period(int sod)
 {
@@ -105,15 +94,14 @@ static int headway_for(service_period_t p)
     }
 }
 
-/* The report specifies "additional Friday/Saturday night runs", i.e.
- * night services exist only on those two nights. A night that begins on
- * Friday evening runs into Saturday morning, so both the 22:00-24:00
- * part of Fri/Sat and the 00:00-06:30 part of Sat/Sun carry trains. */
+/* Night trains only run on Friday and Saturday nights. Those nights run
+ * past midnight, so 22:00-24:00 on Fri/Sat and 00:00-06:30 on Sat/Sun
+ * both have service. */
 static int night_service_runs(int sod, int wday)
 {
-    if (sod >= NIGHT_START_SOD)            /* evening half */
-        return (wday == 5 || wday == 6);   /* Fri, Sat     */
-    return (wday == 6 || wday == 0);       /* Sat, Sun mornings */
+    if (sod >= NIGHT_START_SOD)
+        return (wday == 5 || wday == 6);   /* Fri, Sat evening */
+    return (wday == 6 || wday == 0);       /* Sat, Sun early morning */
 }
 
 static const char *wday_name(int w)
@@ -121,8 +109,6 @@ static const char *wday_name(int w)
     static const char *n[7] = { "Sun","Mon","Tue","Wed","Thu","Fri","Sat" };
     return n[w % 7];
 }
-
-/* ---------------------------------------------------------------- build */
 
 void train_schedule_build(lc_context_t *ctx)
 {
@@ -137,7 +123,7 @@ void train_schedule_build(lc_context_t *ctx)
         service_period_t p = train_schedule_period(sod);
 
         if (p == PERIOD_NIGHT && !night_service_runs(sod, wday)) {
-            /* No service tonight: jump to the end of the night block. */
+            /* No trains tonight; skip to 06:30. */
             int next = (sod >= NIGHT_START_SOD) ? (86400 - sod + NIGHT_END_SOD)
                                                 : (NIGHT_END_SOD - sod);
             t += (next > 0) ? next : 60;
@@ -153,9 +139,9 @@ void train_schedule_build(lc_context_t *ctx)
         t += headway_for(p);
     }
 
-    printf("\n[I%d][Train_Schedule] timetable built: %d services over the next 24h\n",
+    printf("\n[I%d][Train_Schedule] timetable built: %d trains over the next 24h\n",
            ctx->id, g_timetable_len);
-    printf("[I%d][Train_Schedule] clock seeded at %s %02d:%02d:%02d, running at %dx real time\n",
+    printf("[I%d][Train_Schedule] simulated clock starts at %s %02d:%02d:%02d and runs at %dx real time\n",
            ctx->id, wday_name(g_start_wday),
            g_start_sod / 3600, (g_start_sod / 60) % 60, g_start_sod % 60,
            TIME_SCALE_FACTOR);
@@ -165,7 +151,7 @@ void train_schedule_build(lc_context_t *ctx)
            ctx->id, TRAIN_VELOCITY_MPS, TRAIN_SENSOR_TO_LIGHT_M, TRAIN_SENSOR_TO_GATE_M);
 
     int show = (g_timetable_len < 8) ? g_timetable_len : 8;
-    printf("[I%d][Train_Schedule] next %d services:\n", ctx->id, show);
+    printf("[I%d][Train_Schedule] next %d trains:\n", ctx->id, show);
     for (int i = 0; i < show; i++) {
         train_event_t *e = &g_timetable[i];
         printf("      %s %02d:%02d:%02d  %-8s  (sensor trips %ds earlier, +%ds real)\n",
@@ -177,8 +163,6 @@ void train_schedule_build(lc_context_t *ctx)
     printf("\n");
     fflush(stdout);
 }
-
-/* ---------------------------------------------------------------- run */
 
 static void wait_until_sim(int target_s)
 {
@@ -207,23 +191,23 @@ static void *train_schedule_task(void *arg)
         train_event_t *e = &g_timetable[i];
 
         int sensor_at = e->at_s - RAIL_PROTECT_LEAD_S;
-        if (sensor_at < sim_elapsed_s()) continue;   /* already in the past */
+        if (sensor_at < sim_elapsed_s()) continue;   /* too late to warn for this one */
 
         wait_until_sim(sensor_at);
-        printf("[I%d][Train_Schedule] scheduled %s service due %02d:%02d:%02d "
-               "-- sensor tripping now (%ds pre-arrival)\n",
+        printf("[I%d][Train_Schedule] %s train due at %02d:%02d:%02d "
+               "-- train sensor tripped (%ds before arrival)\n",
                ctx->id, train_schedule_period_name(e->period),
                e->sod / 3600, (e->sod / 60) % 60, e->sod % 60, RAIL_PROTECT_LEAD_S);
         fflush(stdout);
         train_sensor_handle_approach(ctx);
 
-        /* The train reaches the crossing at e->at_s and is clear of it
-         * one occupation interval later. */
+        /* The train reaches the crossing at at_s and clears it
+         * RAIL_TRAIN_OCCUPY_S later. */
         wait_until_sim(e->at_s + RAIL_TRAIN_OCCUPY_S);
         train_sensor_handle_cleared(ctx);
     }
 
-    printf("[I%d][Train_Schedule] timetable exhausted\n", ctx->id);
+    printf("[I%d][Train_Schedule] no more trains in the timetable\n", ctx->id);
     fflush(stdout);
     return NULL;
 }

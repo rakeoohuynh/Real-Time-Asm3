@@ -1,7 +1,10 @@
-/* =====================================================================
- * signal_output.c -- Signal_Output_Task (Section 8 rows SET_VEHICLE,
- * SET_PEDESTRIAN, SET_RIGHT_TURN_ARROW).
- * ===================================================================== */
+/*
+ * signal_output.c -- Signal_Output_Task. Handles SET_VEHICLE,
+ * SET_PEDESTRIAN and SET_RIGHT_TURN_ARROW.
+ *
+ * Set LC_FORCE_SIGNAL_FAULT in the environment to make every command
+ * report a fault.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/neutrino.h>
@@ -13,13 +16,12 @@ void *signal_output_task(void *arg)
     for (;;) {
         local_msg_t msg;
         int rcvid = MsgReceive(ctx->sig_chid, &msg, sizeof(msg), NULL);
-        if (rcvid <= 0) continue;   /* pulse (e.g. disconnect) -- ignore */
+        if (rcvid <= 0) continue;   /* pulses (e.g. disconnects) aren't used here */
 
         local_reply_t reply = { .result = 0, .elapsed_ms = 0 };
         int force_fault = (getenv("LC_FORCE_SIGNAL_FAULT") != NULL);
 
-        /* Per-head lines only with -v; the status line in
-         * local_controller.c already shows the resulting state. */
+        /* Only logged with -v; the status line already shows the result. */
         if (msg.type == MSG_SET_VEHICLE) {
             if (ctx->verbose)
                 printf("[I%d][Signal_Output_Task] vehicle head %d -> %s (%ds)\n",

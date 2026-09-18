@@ -1,16 +1,13 @@
 #!/bin/sh
-# =====================================================================
-# build.sh -- one-shot qcc build, matching the qcc-terminal workflow in
-# the README. Equivalent to `make -f Makefile.poc`.
+# Builds local_controller and central_controller with qcc. Same result as
+# `make -f Makefile.poc`. Run from this directory; the binaries land here.
 #
 #   ./build.sh              # demo timing (TIME_SCALE_FACTOR=5)
 #   ./build.sh 1            # real-world timing
 #   TARGET=-Vgcc_ntoaarch64le ./build.sh
 #
-# Layout: shared/ (used by both programs), lc/ (Local Controller),
-# cc/ (Central Controller). Run from this directory; the binaries are
-# written here.
-# =====================================================================
+# If the linker can't find -lpthread, remove it; on QNX 7.1 pthreads are
+# part of libc.
 set -e
 
 SCALE="${1:-5}"

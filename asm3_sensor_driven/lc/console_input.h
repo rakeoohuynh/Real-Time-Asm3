@@ -1,12 +1,10 @@
-/* =====================================================================
- * console_input.h -- keyboard stand-in for the sensor hardware.
+/*
+ * console_input.h -- keyboard stand-in for the sensors.
  *
- * Per the project brief's allowance for key-press-simulated sensor
- * events, one stdin reader dispatches to the handler named after the
- * logical task it represents. Train events also arrive from the
- * timetable (see train_schedule.h); the 't' and 'c' keys remain as a
- * manual way to force one during a demo.
- * ===================================================================== */
+ * Each key calls the handler of the task it simulates. Trains normally
+ * come from the timetable (train_schedule.c); 't' and 'c' force one by
+ * hand.
+ */
 #ifndef CONSOLE_INPUT_H
 #define CONSOLE_INPUT_H
 

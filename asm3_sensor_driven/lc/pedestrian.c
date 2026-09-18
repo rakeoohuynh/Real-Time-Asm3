@@ -1,6 +1,6 @@
-/* =====================================================================
- * pedestrian.c -- pedestrian request latching and WALK sequencing.
- * ===================================================================== */
+/*
+ * pedestrian.c -- pedestrian requests and the WALK sequence.
+ */
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/neutrino.h>
@@ -11,12 +11,13 @@
 
 void pedestrian_input_handle_press(lc_context_t *ctx)
 {
-    /* A11: 50ms debounce. Not scaled -- this is input conditioning, not
-     * a control duration. */
+    /* Debounce (A11). Not scaled: it conditions the input, it isn't a
+     * control duration. */
     usleep(PED_DEBOUNCE_MS * 1000);
 
+    /* One latched request covers every press until it's served (A12). */
     if (ctx->ped_request_pending) {
-        printf("[I%d][Pedestrian_Input_Task] request already pending, press ignored (A12)\n", ctx->id);
+        printf("[I%d][Pedestrian_Input_Task] request already pending, press ignored\n", ctx->id);
     } else {
         ctx->ped_request_pending = 1;
         printf("[I%d][Pedestrian_Input_Task] PED_REQUEST latched\n", ctx->id);
@@ -55,7 +56,8 @@ int pedestrian_advance(lc_context_t *ctx)
         signal_set_pedestrian(ctx, HEAD_PED_CROSSING, P_DONT_WALK, 0);
         ctx->ped_request_pending = 0;
         notify_status(ctx, 0, 0, 0);
-        /* resume the vehicle mode that was interrupted */
+        /* Always hands back to EW green, whichever all-red the crossing
+         * started from. */
         fixed_timing_begin_ew_green(ctx);
         lc_set_phase(ctx, LC_PHASE_EW);
         return 1;

@@ -1,49 +1,41 @@
-/* =====================================================================
+/*
  * local_controller.c
  *
- * QNX Local Controller (LC) for ONE signalised intersection with an
- * adjacent railway crossing (e.g. I1).
+ * Local Controller (LC) for one signalized intersection next to a
+ * railway crossing. Run one per intersection (-i 1 for I1, and so on).
  *
- * This file is the ENTRY POINT ONLY: it creates the channels and
- * connections, starts each task on its own thread, and runs the
- * Phase_Controller_Task dispatch loop. The behaviour behind each pulse
- * lives in the module named after it, so this file should read as
- * "what does the LC do", not "how does each part work".
+ * This file sets up channels and threads, runs the Phase_Controller_Task
+ * loop on the main thread and prints the status line. The work behind
+ * each pulse lives in its own module:
  *
- * Task map (Section 7 task architecture -> module):
- *   Phase_Controller_Task        -> this file (main thread)
- *   Signal_Output_Task           -> signal_output.c
- *   Railway_Signal_Output_Task   -> railway_protection.c
- *   Boom_Gate_Controller_Task    -> boom_gate.c
- *   Status_Reporting_Task        -> status_report.c
- *   Central_Command_Server_Task  -> central_command_server.c
- *   Pedestrian_Input_Task        -> pedestrian.c   (input side)
- *   Vehicle_Sensor_Task          -> sensor_driven.c
- *   Train_Sensor_Task            -> railway_protection.c, fed by
- *                                   train_schedule.c's timetable
+ *   Phase_Controller_Task        this file
+ *   Signal_Output_Task           signal_output.c
+ *   Railway_Signal_Output_Task   railway_protection.c
+ *   Boom_Gate_Controller_Task    boom_gate.c
+ *   Status_Reporting_Task        status_report.c
+ *   Central_Command_Server_Task  central_command_server.c
+ *   Pedestrian_Input_Task        pedestrian.c
+ *   Vehicle_Sensor_Task          sensor_driven.c
+ *   Train_Sensor_Task            railway_protection.c, driven by train_schedule.c
  *
- * Sequencing logic by mode/feature:
- *   fixed-timing cycle           -> fixed_timing.c
- *   sensor-driven early cut      -> sensor_driven.c
- *   mode by time of day (A26)    -> mode_schedule.c
- *   pedestrian WALK sequence     -> pedestrian.c
- *   railway protection (UC-05)   -> railway_protection.c
- *   right-turn arrows            -> right_turn.c
- *   movement permissions         -> phase_table.c
- *   shared state + A40 scaling   -> lc_context.c / common.h
+ *   vehicle cycle                fixed_timing.c
+ *   early end of green           sensor_driven.c
+ *   mode by time of day          mode_schedule.c
+ *   pedestrian crossing          pedestrian.c
+ *   railway protection           railway_protection.c
+ *   right-turn arrows            right_turn.c
+ *   allowed movements            phase_table.c
+ *   shared state, time scaling   lc_context.c, common.h
  *
- * Build:
- *   see Makefile.poc, or build.sh
- * Run:
+ * Usage:
  *   ./local_controller -i 1 [-c <cc_node_name>] [-T HH:MM] [-N] [-v]
  *     -i  intersection id
- *     -c  QNET node the CC lives on (omit for same-node testing)
- *     -T  seed the simulated clock, e.g. -T 06:28 to start just before
- *         a morning peak train; the A26 control mode follows it too
- *     -N  do not run the train timetable (manual 't'/'c' keys only)
- *     -v  verbose: also log every signal-head, railway-signal and gate
- *         command, not just the one-line status summary
- * ===================================================================== */
+ *     -c  QNET node the CC runs on (omit when it's on this node)
+ *     -T  start the simulated clock at HH:MM, e.g. -T 06:28 for just
+ *         before the morning peak; trains and the control mode follow it
+ *     -N  no train timetable; use the 't'/'c' keys instead
+ *     -v  also log every signal-head, railway-signal and gate command
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,16 +63,12 @@
 #include "console_input.h"
 #include "train_schedule.h"
 
-/* Connection the 100ms POSIX timer delivers its pulse on. */
+/* Connection the 100ms timer sends its pulse on. */
 static int g_timer_coid;
 
-/* ---------------------------------------------------------------------
- * One-line status summary, printed whenever something visible changes:
- * the step, a signal head, the gate, the mode or the faults. This is the
- * line to read; the per-head output lines only appear with -v.
- * Runs on Phase_Controller_Task, the only writer of these fields, so it
- * reads them without the lock.
- * ------------------------------------------------------------------- */
+/* One status line per visible change: step, signal heads, gate, mode or
+ * faults. Runs on Phase_Controller_Task, which is the only writer of
+ * these fields, so no lock is needed to read them. */
 typedef struct {
     lc_step_t       step;
     control_mode_t  mode;
@@ -113,12 +101,11 @@ static void print_status_line(lc_context_t *ctx)
     have_last = 1;
 
     /* Time left in the step, in real-world seconds like every other
-     * duration the LC logs. */
+     * duration in the log. */
     int left_s = (ctx->countdown_ms > 0)
                      ? (ctx->countdown_ms * TIME_SCALE_FACTOR + 999) / 1000 : 0;
 
-    /* Wall-clock stamp, the same clock the CC stamps its log with, so the
-     * two consoles can be lined up line for line. */
+    /* Wall-clock time, same as the CC's log, so the two consoles line up. */
     time_t now = time(NULL);
     struct tm lt;
     localtime_r(&now, &lt);
@@ -140,30 +127,26 @@ static void print_status_line(lc_context_t *ctx)
     fflush(stdout);
 }
 
-/* ---------------------------------------------------------------------
- * One step's countdown reached zero. Ask each module in priority order
- * whether the expired step is theirs: railway protection outranks
- * pedestrian service, which outranks ordinary vehicle sequencing.
- * ------------------------------------------------------------------- */
+/* The current step's countdown ran out. Offer it to each module in
+ * priority order: railway, then pedestrian, then the vehicle cycle. */
 static void advance_step(lc_context_t *ctx)
 {
     if (railway_advance(ctx))     return;
     if (pedestrian_advance(ctx))  return;
     if (fixed_timing_advance(ctx)) return;
 
-    printf("[I%d][Phase_Controller_Task] unhandled step %s -- holding\n",
+    printf("[I%d][Phase_Controller_Task] no handler for step %s -- holding it\n",
            ctx->id, lc_step_name(ctx->step));
     fflush(stdout);
     lc_enter_step(ctx, ctx->step, 1000 * TIME_SCALE_FACTOR);
 }
 
-/* =========================================================================
- * Phase_Controller_Task -- the safety-critical core (Section 7: retains
- * local authority over real-time signal execution, independent of CC).
- * Runs on the process's main thread. Driven by a 100ms POSIX timer pulse
- * (A39) plus asynchronous pulses from sensors, CC, the gate and the
- * railway. Nothing in this loop blocks on the CC or on hardware.
- * ========================================================================= */
+/*
+ * Phase_Controller_Task: owns the signals and works without the CC.
+ * Driven by a 100ms timer pulse plus pulses from the sensors, the CC
+ * command server, the gate and the train sensor. Nothing in this loop
+ * waits on the CC or on hardware.
+ */
 static void phase_controller_task(lc_context_t *ctx)
 {
     mode_schedule_init(ctx);
@@ -171,8 +154,7 @@ static void phase_controller_task(lc_context_t *ctx)
     fixed_timing_begin_ns_green(ctx);
     lc_set_phase(ctx, LC_PHASE_NS);
 
-    /* 100ms POSIX timer (A39). NOT scaled: this is scheduling
-     * resolution, not a real-world duration. */
+    /* Not scaled: this is the scheduler resolution (A39). */
     timer_t timerid;
     struct sigevent ev;
     SIGEV_PULSE_INIT(&ev, g_timer_coid, SIGEV_PULSE_PRIO_INHERIT, PULSE_PHASE_TIMER, 0);
@@ -186,7 +168,7 @@ static void phase_controller_task(lc_context_t *ctx)
     for (;;) {
         struct _pulse pulse;
         int rcvid = MsgReceive(ctx->phase_chid, &pulse, sizeof(pulse), NULL);
-        if (rcvid != 0) continue; /* only pulses expected here */
+        if (rcvid != 0) continue; /* this channel only takes pulses */
 
         switch (pulse.code) {
 
@@ -199,11 +181,11 @@ static void phase_controller_task(lc_context_t *ctx)
             break;
 
         case PULSE_PED_REQUEST:
-            /* latched; serviced at the next STEP_*_ALLRED boundary (A2/A13) */
+            /* Already latched; served at the next all-red. */
             break;
 
         case PULSE_VEHICLE_DEMAND:
-            break; /* flags already set by the sensor handler */
+            break; /* the sensor handler already set the flag */
 
         case PULSE_TRAIN_APPROACH:
             if (!railway_is_active(ctx)) railway_begin_protection(ctx);
@@ -229,9 +211,7 @@ static void phase_controller_task(lc_context_t *ctx)
     }
 }
 
-/* ---------------------------------------------------------------------
- * -T HH:MM  ->  seconds of day, or -1 if unparseable.
- * ------------------------------------------------------------------- */
+/* "HH:MM" -> seconds since midnight, or -1 if it doesn't parse. */
 static int parse_hhmm(const char *s)
 {
     int h = 0, m = 0;
@@ -255,7 +235,7 @@ int main(int argc, char **argv)
         case 'c': strncpy(cc_node, optarg, sizeof(cc_node) - 1); break;
         case 'T':
             seed_sod = parse_hhmm(optarg);
-            if (seed_sod < 0) { fprintf(stderr, "bad -T value '%s', expected HH:MM\n", optarg); return 1; }
+            if (seed_sod < 0) { fprintf(stderr, "Invalid -T value '%s' (expected HH:MM)\n", optarg); return 1; }
             break;
         case 'N': run_timetable = 0; break;
         case 'v': verbose = 1; break;
@@ -267,27 +247,25 @@ int main(int argc, char **argv)
     lc_context_init(ctx, id, cc_node);
     ctx->verbose = verbose;
 
-    /* UC-01 startup: validate the phase table before driving anything. */
+    /* Don't drive any signal from an unsafe phase table (UC-01). */
     if (phase_table_validate() != 0) {
-        fprintf(stderr, "[I%d] phase table failed validation -- refusing to start\n", id);
+        fprintf(stderr, "[I%d] phase table failed validation, not starting\n", id);
         return 1;
     }
 
-    /* --- internal channels --- */
     ctx->phase_chid  = ChannelCreate(0);
     ctx->sig_chid    = ChannelCreate(0);
     ctx->rail_chid   = ChannelCreate(0);
     ctx->gate_chid   = ChannelCreate(0);
     ctx->status_chid = ChannelCreate(0);
 
-    /* --- external, CC-facing channel --- */
+    /* Named channel the CC sends commands to. */
     char chan_name[32];
     lc_channel_name(chan_name, sizeof(chan_name), ctx->id);
     name_attach_t *na = name_attach(NULL, chan_name, 0);
     if (!na) { perror("name_attach"); return 1; }
     ctx->net_chid = na->chid;
 
-    /* --- internal client connections (same-process, side-channel) --- */
     ctx->coid_phase  = ConnectAttach(0, 0, ctx->phase_chid,  _NTO_SIDE_CHANNEL, 0);
     ctx->coid_status = ConnectAttach(0, 0, ctx->status_chid, _NTO_SIDE_CHANNEL, 0);
     ctx->coid_sig    = ConnectAttach(0, 0, ctx->sig_chid,    _NTO_SIDE_CHANNEL, 0);
@@ -297,8 +275,8 @@ int main(int argc, char **argv)
 
     printf("=== Local Controller I%d starting (CC node: %s) ===\n",
            ctx->id, ctx->cc_node[0] ? ctx->cc_node : "<same node>");
-    printf("=== A40 demonstration scaling: TIME_SCALE_FACTOR = %d "
-           "(1 = real-world timing) ===\n", TIME_SCALE_FACTOR);
+    printf("=== Demo time scaling: TIME_SCALE_FACTOR = %d "
+           "(1 = real time) ===\n", TIME_SCALE_FACTOR);
     fflush(stdout);
 
     phase_table_dump();
@@ -312,18 +290,16 @@ int main(int argc, char **argv)
     pthread_create(&th, NULL, central_command_server_task, ctx); pthread_detach(th);
     pthread_create(&th, NULL, console_input_task, ctx);          pthread_detach(th);
 
-    /* Seeded even with -N: the A26 mode schedule reads this clock. */
+    /* Needed even with -N: the mode schedule reads this clock. */
     train_schedule_init(seed_sod);
     if (run_timetable) {
         train_schedule_build(ctx);
         train_schedule_start(ctx);
     } else {
-        printf("[I%d][Train_Schedule] disabled (-N): use the 't'/'c' keys\n", ctx->id);
+        printf("[I%d][Train_Schedule] timetable off (-N); use the 't'/'c' keys\n", ctx->id);
         fflush(stdout);
     }
 
-    /* Phase_Controller_Task owns the main thread (safety-critical, must
-     * not be starved by anything else in this process). */
     phase_controller_task(ctx);
     return 0;
 }

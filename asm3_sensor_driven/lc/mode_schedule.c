@@ -1,7 +1,7 @@
-/* =====================================================================
- * mode_schedule.c -- time-of-day control mode (A26).
- * Runs on Phase_Controller_Task, the only writer of the mode.
- * ===================================================================== */
+/*
+ * mode_schedule.c -- control mode by time of day (A26).
+ * Runs on Phase_Controller_Task, the only thread that changes the mode.
+ */
 #include <stdio.h>
 #include "mode_schedule.h"
 #include "status_report.h"
@@ -18,7 +18,7 @@ static void apply_period(lc_context_t *ctx, service_period_t p, int sod, const c
 {
     g_period = p;
     lc_set_mode(ctx, mode_for(p));
-    printf("[I%d][Mode_Schedule] %s %02d:%02d %s period -> %s mode (A26)\n",
+    printf("[I%d][Mode_Schedule] %s %02d:%02d, %s period -> %s mode\n",
            ctx->id, why, sod / 3600, (sod / 60) % 60,
            train_schedule_period_name(p), lc_mode_name(mode_for(p)));
     fflush(stdout);

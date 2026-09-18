@@ -1,24 +1,23 @@
-/* =====================================================================
- * boom_gate.c -- Boom_Gate_Controller_Task (Section 8 rows
- * COMMAND_BOOM_GATE / GATE_STATUS).
- * ===================================================================== */
+/*
+ * boom_gate.c -- Boom_Gate_Controller_Task. Handles COMMAND_BOOM_GATE and
+ * reports back with PULSE_GATE_STATUS.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/neutrino.h>
 #include "boom_gate.h"
 
-/* PoC value with no report source: the gate is assumed to raise in half
- * the time it takes to lower, since raising is not safety-critical. */
+/* Assumed value: the gate raises in half its lowering time. Raising isn't
+ * safety-critical, so nothing depends on this being exact. */
 #define GATE_RAISE_S   (RAIL_GATE_LOWER_S / 2)
 
-/* How long the gate is given to complete its travel before the move is
- * declared a timeout fault. Lowering must finish inside the A16 window,
- * so the window is also the deadline. */
+/* Lowering has to finish inside the RAIL_GATE_LOWER_S window, so that
+ * window is also the deadline for any gate move. */
 #define GATE_MOVE_TIMEOUT_S   RAIL_GATE_LOWER_S
 
-static int g_close_attempts = 0;   /* attempts used in the current episode */
+static int g_close_attempts = 0;   /* attempts used in the current close sequence */
 
-/* pulse payload packing: result | closing<<8 | gate_id<<16 */
+/* Pulse value layout: result | closing << 8 | gate_id << 16 */
 #define GATE_PULSE_PACK(res, closing, id) \
     ( ((res) & 0xFF) | (((closing) & 1) << 8) | (((id) & 0xFF) << 16) )
 #define GATE_PULSE_RESULT(v)   ((v) & 0xFF)
@@ -51,16 +50,16 @@ void *boom_gate_task(void *arg)
             fflush(stdout);
         }
 
-        /* Accept the command and release the controller straight away;
-         * the travel time is simulated below on this thread. */
+        /* Reply right away so the controller isn't blocked; the travel
+         * time is simulated below on this thread. */
         local_reply_t ack = { .result = 0, .elapsed_ms = 0 };
         MsgReply(rcvid, EOK, &ack, sizeof(ack));
 
-        /* LC_FORCE_GATE_FAULT       -- every close attempt times out.
-         * LC_FORCE_GATE_FAULT_ONCE  -- only the first attempt does, so a
-         *                              demo can show the retry recovering.
-         * 'g' key                   -- the next close attempt times out;
-         *                              consumed here, so the retry succeeds. */
+        /* Ways to simulate a gate that doesn't lock:
+         *   LC_FORCE_GATE_FAULT       every close attempt times out
+         *   LC_FORCE_GATE_FAULT_ONCE  only the first attempt does, so the
+         *                             retry can be seen recovering
+         *   'g' key                   the next close attempt times out */
         int forced_always = closing && (getenv("LC_FORCE_GATE_FAULT") != NULL);
         int forced_once   = closing && (getenv("LC_FORCE_GATE_FAULT_ONCE") != NULL)
                                     && (g_close_attempts <= 1);
@@ -97,11 +96,11 @@ static void gate_command(lc_context_t *ctx, int command, int timeout_s)
     m.body.boom_gate.command   = command;
     m.body.boom_gate.timeout_s = timeout_s;
     if (MsgSend(ctx->coid_gate, &m, sizeof(m), &r, sizeof(r)) == -1) {
-        /* The gate task is unreachable: synthesise the fault locally so
-         * the sequence still reaches its fault branch. */
+        /* The gate task is gone. Record the fault here so the gate
+         * doesn't look healthy on the status line or at the CC. */
         lc_raise_fault(ctx, FAULT_BOOM_GATE);
         lc_set_gate_state(ctx, GATE_TIMEOUT_FAULT);
-        printf("[I%d][Boom_Gate_Controller_Task] gate command unreachable (errno path)\n", ctx->id);
+        printf("[I%d][Boom_Gate_Controller_Task] could not reach the gate task; gate marked FAULT\n", ctx->id);
         fflush(stdout);
     }
 }

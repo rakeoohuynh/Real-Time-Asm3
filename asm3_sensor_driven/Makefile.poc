@@ -1,20 +1,15 @@
-# =====================================================================
-# Makefile.poc -- builds the LC/CC proof-of-concept.
+# Builds local_controller and central_controller.
 #
 #   make -f Makefile.poc              # both binaries, demo timing
-#   make -f Makefile.poc SCALE=1      # real-world timing (A40 off)
+#   make -f Makefile.poc SCALE=1      # real-world timing
 #   make -f Makefile.poc clean
 #
-# Kept separate from the Momentics recursive Makefile in this directory:
-# that one builds a single target from the project folder, which cannot
-# work for two programs with their own main(). See the note in README.md.
-#
-# Layout: shared/ (used by both programs), lc/ (Local Controller),
-# cc/ (Central Controller). Objects are written next to their sources.
-# =====================================================================
+# This is separate from the Momentics Makefile in this directory, which
+# builds one binary from every .c file and can't handle two programs
+# with their own main(). Object files go next to their sources.
 
-# Plain '=' not '?=': make predefines CC=cc, so '?=' would never apply.
-# It can still be overridden on the command line (make CC=...).
+# Plain '=' on purpose: make predefines CC=cc, so '?=' would never take
+# effect. `make CC=...` still overrides it.
 CC      = qcc
 TARGETV ?= -Vgcc_ntox86_64
 SCALE   ?= 5

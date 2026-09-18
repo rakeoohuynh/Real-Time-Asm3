@@ -1,6 +1,6 @@
-/* =====================================================================
- * console_input.c -- simulated sensor input.
- * ===================================================================== */
+/*
+ * console_input.c -- simulated sensor input from the keyboard.
+ */
 #include <stdio.h>
 #include "console_input.h"
 #include "pedestrian.h"
@@ -24,11 +24,11 @@ void *console_input_task(void *arg)
             case 'c': train_sensor_handle_cleared(ctx); break;
             case 'g':
                 lc_arm_gate_fault(ctx);
-                printf("[I%d][Console] boom-gate fault ARMED: the next gate CLOSE will time out "
+                printf("[I%d][Console] gate fault ARMED: the next gate close will time out "
                        "(the retry will succeed)\n", ctx->id);
                 fflush(stdout);
                 break;
-            case 'q': printf("[I%d] shutting down input task\n", ctx->id); return NULL;
+            case 'q': printf("[I%d] keyboard input stopped; the controller keeps running\n", ctx->id); return NULL;
             default: break;
         }
     }

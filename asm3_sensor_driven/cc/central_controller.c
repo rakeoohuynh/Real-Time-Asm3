@@ -1,44 +1,35 @@
-/* =====================================================================
+/*
  * central_controller.c
  *
- * QNX Central Controller (CC) proof-of-concept.
+ * Central Controller (CC). It monitors the intersections, logs what they
+ * report and sends operator commands. It never drives a signal itself:
+ * each LC keeps control of its own intersection and carries on if the
+ * CC or the link goes down (UC-08).
  *
- * Design principle (Section 7): the CC monitors, logs, schedules and
- * issues high-level commands; it NEVER touches a signal head directly.
- * Every local controller (LC) retains sole execution authority over its
- * own intersection and keeps running autonomously if the CC or the
- * comms link disappears (see local_controller.c / UC-08).
+ * Threads:
+ *   comm_worker()            Central_Communication_Task: a few threads
+ *                            sharing one channel, so reports from several
+ *                            LCs are handled in parallel (UC-06)
+ *   display_task()           prints the dashboard periodically
+ *   command_worker()         delivers queued commands and handles
+ *                            NET_RESULT_WAIT resends, so the console never
+ *                            waits on an LC
+ *   operator_console_task()  main thread, reads operator commands
  *
- * Task map:
- *   Central_Communication_Task -> comm_worker() (a small pool of
- *       threads on ONE shared channel, per UC-06's "CC runs a small
- *       pool of server threads on that channel so it can receive
- *       multiple parallel status instead of serialized status")
- *   Display/Logging            -> display_task()     (thread)
- *   Operator console           -> operator_console_task() (main thread)
- *   Command delivery           -> command_worker()   (thread) -- sends
- *       queued OVERRIDE_COMMAND/MODE_SWITCH and waits out NET_RESULT_WAIT
- *       retries, so the operator console never blocks on an LC
+ * The CC doesn't need to be told where each LC runs. The first report
+ * from an intersection carries the sender's QNET node descriptor
+ * (MsgInfo()), and commands to that LC are sent back to the same node.
  *
- * LC discovery: the CC does not need to be told where each LC lives.
- * The first STATUS_UPDATE/FAULT_ALARM received from an intersection
- * carries the sender's QNET node descriptor (via MsgInfo()); the CC
- * uses that to open an OVERRIDE_COMMAND/MODE_SWITCH connection back to
- * that same LC on demand, which is how a real multi-node QNET deployment
- * finds its peers without static configuration.
+ * Build: see build.sh or Makefile.poc (needs -I../shared).
  *
- * Build (QNX qcc):
- *   qcc -Vgcc_ntox86_64 -o central_controller central_controller.c -lpthread -lsocket
- * Run:
- *   ./central_controller
- * Operator console commands (typed at the CC's terminal):
- *   status                       - print the dashboard table now
- *   override <id> <cmd> [seq]    - cmd: allred|nsgreen|ewgreen|dignitary
- *   mode <id> <fixed|sensor>     - request a mode switch
- *   verbose <on|off>             - log every STATUS_UPDATE, or (default)
- *                                  only phase/mode/fault changes
+ * Console commands:
+ *   status                      print the dashboard now
+ *   override <id> <type>        type: allred | nsgreen | ewgreen | dignitary
+ *   mode <id> <fixed|sensor>    switch an intersection's control mode
+ *   verbose <on|off>            log every STATUS_UPDATE, or (default) only
+ *                               phase, mode and fault changes
  *   quit
- * ===================================================================== */
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,19 +46,17 @@
 #define COMM_POOL_THREADS  3
 #define DASHBOARD_PERIOD_S 10
 
-/* An LC reports only on a state change, so silence is normal for up to
- * one step. The longest ordinary step is a vehicle GREEN; a link is
- * shown STALE after twice that (scaled) plus a margin. */
+/* An LC only reports when its state changes, so a quiet link is normal
+ * for up to one step. The longest normal step is a vehicle green; call
+ * the link STALE after twice that (scaled) plus a margin. */
 #define CC_LINK_STALE_S    ((2 * VEHICLE_GREEN_S) / TIME_SCALE_FACTOR + 5)
 
-/* ---------------------------------------------------------------------
- * Per-intersection record, built up as STATUS_UPDATE/FAULT_ALARM arrive.
- * ------------------------------------------------------------------- */
+/* What the CC knows about one intersection. */
 typedef struct {
     int        in_use;
     int        id;
-    int32_t    node_desc;         /* QNET node descriptor of the LC, from MsgInfo().nd */
-    int        override_coid;     /* cached connection for sending OVERRIDE/MODE_SWITCH, -1 if none */
+    int32_t    node_desc;         /* LC's QNET node, from MsgInfo().nd */
+    int        override_coid;     /* cached command connection, -1 if none */
 
     lc_phase_t       phase;
     vehicle_state_t  ns_state, ew_state;
@@ -77,15 +66,15 @@ typedef struct {
     control_mode_t   mode;
     uint32_t         fault_flags;
     int              last_fault_code;
-    time_t           last_update; /* CC's clock at receipt, not the LC's timestamp */
-    int              link_seen;   /* have we ever heard from this LC */
+    time_t           last_update; /* CC clock when the report arrived */
+    int              link_seen;   /* at least one report received */
 } lc_record_t;
 
 static lc_record_t   g_lc[MAX_TRACKED_LC];
 static pthread_mutex_t g_lc_lock = PTHREAD_MUTEX_INITIALIZER;
 static int            g_cc_chid;
 static uint32_t       g_seq_no = 1;
-static volatile int   g_verbose = 0;   /* "verbose on": log every STATUS_UPDATE */
+static volatile int   g_verbose = 0;
 
 static const char *vname(vehicle_state_t s)
 {
@@ -107,9 +96,8 @@ static const char *pname_local(ped_state_t s)
 {
     switch (s) { case P_WALK: return "WALK"; case P_CLEARANCE: return "CLEARANCE"; default: return "DONT_WALK"; }
 }
-/* Right-turn arrows are reported separately from the main 3-colour
- * state, so the dashboard can show a green arrow beside a red main:
- * "RED+ARROW". */
+/* Main signal plus arrow, e.g. "RED+ARROW" when the right-turn arrow is
+ * green against a red main signal. */
 static const char *vehicle_label(vehicle_state_t s, arrow_state_t a, char *buf, size_t len)
 {
     snprintf(buf, len, "%s%s", vname(s), (a == ARROW_GREEN) ? "+ARROW" : "");
@@ -139,10 +127,10 @@ static lc_record_t *find_or_create(int id)
             return &g_lc[i];
         }
     }
-    return NULL; /* registry full */
+    return NULL; /* all slots taken */
 }
 
-/* Wall-clock HH:MM:SS for log and dashboard stamps. */
+/* Wall-clock HH:MM:SS. */
 static const char *clock_str(char *buf, size_t len)
 {
     time_t now = time(NULL);
@@ -152,9 +140,9 @@ static const char *clock_str(char *buf, size_t len)
     return buf;
 }
 
-/* Log one received report. A FAULT_ALARM is always shown. A
- * STATUS_UPDATE is shown in full only in verbose mode; otherwise only
- * first contact and changes of phase, mode or faults are logged. */
+/* FAULT_ALARMs are always logged. STATUS_UPDATEs are logged in full only
+ * in verbose mode; otherwise only first contact and changes of phase,
+ * mode or faults. */
 static void log_report(int worker_no, const net_report_t *m, int first_contact,
                        lc_phase_t old_phase, control_mode_t old_mode, uint32_t old_faults)
 {
@@ -189,13 +177,9 @@ static void log_report(int worker_no, const net_report_t *m, int first_contact,
     fflush(stdout);
 }
 
-/* =========================================================================
- * Central_Communication_Task (thread pool)
- *   All threads MsgReceive() on the SAME channel; QNX round-robins
- *   pending messages across whichever thread calls MsgReceive() next,
- *   which is exactly the "small pool of server threads ... to receive
- *   multiple parallel status instead of serialized status" from UC-06.
- * ========================================================================= */
+/* Central_Communication_Task. Every worker receives on the same channel,
+ * and the kernel hands each message to whichever worker is free, so one
+ * slow report doesn't hold up the others (UC-06). */
 static void *comm_worker(void *arg)
 {
     int worker_no = (int)(intptr_t)arg;
@@ -203,11 +187,12 @@ static void *comm_worker(void *arg)
         net_report_t   msg;
         struct _msg_info info;
         int rcvid = MsgReceive(g_cc_chid, &msg, sizeof(msg), &info);
-        if (rcvid <= 0) continue;  /* pulse -- ignore, nothing else uses this channel as a pulse source */
+        if (rcvid <= 0) continue;  /* no pulses are used on this channel */
 
+        /* Reply before processing so the LC is never kept waiting (UC-06). */
         net_reply_t ack; memset(&ack, 0, sizeof(ack));
         ack.result = NET_RESULT_ACCEPTED;
-        MsgReply(rcvid, EOK, &ack, sizeof(ack));  /* UC-06: reply immediately, no processing delay */
+        MsgReply(rcvid, EOK, &ack, sizeof(ack));
 
         lc_record_t   *rec;
         int            first_contact = 0;
@@ -223,7 +208,7 @@ static void *comm_worker(void *arg)
             old_mode      = rec->mode;
             old_faults    = rec->fault_flags;
 
-            rec->node_desc   = info.nd;   /* remember where this LC lives, for future overrides */
+            rec->node_desc   = info.nd;   /* where to send commands for this LC */
             rec->phase       = msg.phase;
             rec->ns_state    = msg.ns_state;
             rec->ew_state    = msg.ew_state;
@@ -233,7 +218,7 @@ static void *comm_worker(void *arg)
             rec->gate_state  = msg.gate_state;
             rec->mode        = msg.mode;
             rec->fault_flags = msg.fault_flags;
-            rec->last_update = time(NULL);   /* the LC's clock may differ from ours */
+            rec->last_update = time(NULL);   /* our clock; the LC's may differ */
             rec->link_seen   = 1;
             if (msg.type == NET_FAULT_ALARM) rec->last_fault_code = msg.fault_code;
         }
@@ -244,11 +229,8 @@ static void *comm_worker(void *arg)
     return NULL;
 }
 
-/* =========================================================================
- * Dashboard -- the CC "displays the status and light settings received
- * from the individual intersections". One row per intersection; LINK is
- * OK/STALE by the age of its last report (CC_LINK_STALE_S).
- * ========================================================================= */
+/* Dashboard: one row per intersection. LINK is OK or STALE depending on
+ * the age of the last report (CC_LINK_STALE_S). */
 #define DASH_ROW_FMT "%-4s %-13s %-12s %-12s %-10s %-9s %-7s %-10s %s\n"
 
 static void print_dashboard(void)
@@ -299,28 +281,27 @@ static void *display_task(void *arg)
     return NULL;
 }
 
-/* =========================================================================
- * Operator-driven commands (UC-03 MODE_SWITCH, UC-07 OVERRIDE_COMMAND)
+/*
+ * Operator commands: MODE_SWITCH (UC-03) and OVERRIDE_COMMAND (UC-07).
  *
- * The console only queues a command. command_worker() delivers it with a
- * bounded MsgSend and, on NET_RESULT_WAIT, re-queues it for after the
- * wait the LC asked for -- so the console stays usable meanwhile, and a
- * hung LC or dead QNET link cannot freeze it.
- * ========================================================================= */
+ * The console only queues a command. command_worker() sends it with a
+ * timeout and, on NET_RESULT_WAIT, queues it again for after the wait
+ * the LC asked for. A hung LC or a dead link can't freeze the console.
+ */
 #define CMD_QUEUE_LEN         8
-#define CMD_MAX_ATTEMPTS      4      /* initial send + 3 resends after WAIT */
-#define CMD_SEND_TIMEOUT_MS   2000   /* bound on send + reply to one LC     */
+#define CMD_MAX_ATTEMPTS      4      /* first send + 3 resends after WAIT */
+#define CMD_SEND_TIMEOUT_MS   2000   /* send + reply, per attempt */
 
 typedef struct {
     int           in_use;
     net_command_t cmd;
     int           attempts;
-    uint64_t      not_before_ms;     /* now_ms() before which it is not sent */
+    uint64_t      not_before_ms;     /* don't send before this now_ms() */
 } pending_cmd_t;
 
 static pending_cmd_t   g_cmdq[CMD_QUEUE_LEN];
 static pthread_mutex_t g_cmdq_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_cmdq_cond;  /* CLOCK_MONOTONIC, initialised in main() */
+static pthread_cond_t  g_cmdq_cond;  /* uses CLOCK_MONOTONIC; set up in main() */
 
 static uint64_t now_ms(void)
 {
@@ -334,8 +315,8 @@ static const char *cmd_label(const net_command_t *cmd)
     return (cmd->type == NET_OVERRIDE_COMMAND) ? "OVERRIDE_COMMAND" : "MODE_SWITCH";
 }
 
-/* Caller holds g_cmdq_lock. A queued command of the same type for the
- * same intersection, so a newer one can replace it. */
+/* Finds a queued command of the same type for the same intersection, so
+ * a newer one can replace it. Caller holds g_cmdq_lock. */
 static pending_cmd_t *find_queued_locked(const net_command_t *cmd)
 {
     for (int i = 0; i < CMD_QUEUE_LEN; i++)
@@ -350,7 +331,7 @@ static void enqueue_command(const net_command_t *cmd)
     pthread_mutex_lock(&g_cmdq_lock);
     pending_cmd_t *slot = find_queued_locked(cmd);
     if (slot) {
-        printf("[CC][Operator_Console] %s seq=%u for I%d superseded by seq=%u\n",
+        printf("[CC][Operator_Console] %s seq=%u for I%d replaced by seq=%u\n",
                cmd_label(cmd), slot->cmd.sequence_no, cmd->intersection_id, cmd->sequence_no);
     } else {
         for (int i = 0; i < CMD_QUEUE_LEN && !slot; i++)
@@ -369,8 +350,8 @@ static void enqueue_command(const net_command_t *cmd)
     pthread_mutex_unlock(&g_cmdq_lock);
 }
 
-/* Put a command back for a later resend, unless the operator has queued
- * a newer one of the same kind meanwhile -- the newer one wins. */
+/* Queues a command again for a later resend, unless the operator has
+ * queued a newer one of the same kind since; the newer one wins. */
 static void requeue_command(const pending_cmd_t *job)
 {
     pthread_mutex_lock(&g_cmdq_lock);
@@ -394,7 +375,7 @@ static void requeue_command(const pending_cmd_t *job)
     pthread_mutex_unlock(&g_cmdq_lock);
 }
 
-/* Block until a queued command is due, then remove and return it. */
+/* Blocks until a queued command is due, then removes and returns it. */
 static pending_cmd_t dequeue_due_command(void)
 {
     pending_cmd_t job;
@@ -428,9 +409,9 @@ static pending_cmd_t dequeue_due_command(void)
     return job;
 }
 
-/* Cached command connection to an LC, opening it if needed. name_open()
- * can take a while over QNET, so it runs without g_lc_lock held; only
- * command_worker() opens or drops these connections. */
+/* Returns the command connection to an LC, opening it if needed.
+ * name_open() can be slow over QNET, so it runs without g_lc_lock held;
+ * only command_worker() opens or drops these connections. */
 static int connection_for(int id)
 {
     pthread_mutex_lock(&g_lc_lock);
@@ -446,10 +427,9 @@ static int connection_for(int id)
     char chan_name[32], path[160];
     lc_channel_name(chan_name, sizeof(chan_name), id);
 
-    /* NOTE: ND2S_LOCAL_STR / netmgr_ndtostr() signature can vary slightly
-     * between QNX SDP header revisions -- check <sys/netmgr.h> on the
-     * target toolchain (SDP 7.1 per project notes) and adjust the flag
-     * name below if it does not match. */
+    /* ND2S_LOCAL_STR and the netmgr_ndtostr() signature have changed
+     * between QNX releases. If this doesn't build, check <sys/netmgr.h>
+     * in your SDP. */
     if (link_seen && node_desc != 0 && node_desc != ND_LOCAL_NODE) {
         char nodestr[64];
         if (netmgr_ndtostr(ND2S_LOCAL_STR, node_desc, nodestr, sizeof(nodestr)) > 0)
@@ -463,7 +443,7 @@ static int connection_for(int id)
     coid = name_open(path, 0);
     if (coid >= 0) {
         pthread_mutex_lock(&g_lc_lock);
-        rec->override_coid = coid;   /* rec is a stable slot in g_lc[] */
+        rec->override_coid = coid;   /* slots in g_lc[] never move */
         pthread_mutex_unlock(&g_lc_lock);
     }
     return coid;
@@ -478,14 +458,14 @@ static void drop_connection(int id, int coid)
     name_close(coid);
 }
 
-/* One delivery attempt, following UC-07 "reject with wait=N -> CC delays
- * -> resend" for up to CMD_MAX_ATTEMPTS sends. */
+/* One delivery attempt. If the LC answers WAIT, the command is queued
+ * again for after the wait, up to CMD_MAX_ATTEMPTS sends (UC-07). */
 static void deliver_command(pending_cmd_t *job)
 {
     int id = job->cmd.intersection_id;
     int coid = connection_for(id);
     if (coid < 0) {
-        printf("[CC][Command_Worker] cannot reach I%d (link not established)\n", id);
+        printf("[CC][Command_Worker] can't reach I%d yet (no connection to its channel)\n", id);
         fflush(stdout);
         return;
     }
@@ -494,8 +474,8 @@ static void deliver_command(pending_cmd_t *job)
     memset(&reply, 0, sizeof(reply));
     job->attempts++;
 
-    /* Bound both the send and the wait for the reply. A timeout while
-     * REPLY-blocked means the LC may still have acted on the command. */
+    /* Time out both the send and the reply. A timeout while waiting for
+     * the reply means the LC may still have acted on the command. */
     uint64_t ns = (uint64_t)CMD_SEND_TIMEOUT_MS * 1000000ULL;
     TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY, NULL, &ns, NULL);
     if (MsgSend(coid, &job->cmd, sizeof(job->cmd), &reply, sizeof(reply)) == -1) {
@@ -504,7 +484,7 @@ static void deliver_command(pending_cmd_t *job)
                cmd_label(&job->cmd), id, err,
                (err == ETIMEDOUT) ? ": no reply in time, outcome unknown" : "");
         fflush(stdout);
-        drop_connection(id, coid);   /* force a fresh connection next time */
+        drop_connection(id, coid);   /* reconnect on the next attempt */
         return;
     }
 
@@ -515,7 +495,7 @@ static void deliver_command(pending_cmd_t *job)
             printf("[CC][Command_Worker] I%d rejected: %s -- still not accepted after %d attempts, giving up\n",
                    id, reply.reason, job->attempts);
         } else {
-            printf("[CC][Command_Worker] I%d rejected: %s -- resending in %ds (attempt %d/%d, UC-07)\n",
+            printf("[CC][Command_Worker] I%d rejected: %s -- resending in %ds (attempt %d/%d)\n",
                    id, reply.reason, reply.wait_seconds, job->attempts, CMD_MAX_ATTEMPTS);
             job->not_before_ms = now_ms() + (uint64_t)reply.wait_seconds * 1000u;
             requeue_command(job);
@@ -541,14 +521,14 @@ static void do_override(int id, const char *cmd_name)
     pthread_mutex_lock(&g_lc_lock);
     lc_record_t *rec = find_or_create(id);
     pthread_mutex_unlock(&g_lc_lock);
-    if (!rec) { printf("[CC] intersection registry full\n"); return; }
+    if (!rec) { printf("[CC] can't track more than %d intersections\n", MAX_TRACKED_LC); return; }
 
     int cmd_type;
     if      (!strcmp(cmd_name, "allred"))    cmd_type = OVR_FORCE_ALL_RED;
     else if (!strcmp(cmd_name, "nsgreen"))   cmd_type = OVR_FORCE_NS_GREEN;
     else if (!strcmp(cmd_name, "ewgreen"))   cmd_type = OVR_FORCE_EW_GREEN;
     else if (!strcmp(cmd_name, "dignitary")) cmd_type = OVR_DIGNITARY_PATH;
-    else { printf("[CC] unknown override type '%s'\n", cmd_name); return; }
+    else { printf("[CC] unknown override type '%s' (use allred, nsgreen, ewgreen or dignitary)\n", cmd_name); return; }
 
     net_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
@@ -566,12 +546,12 @@ static void do_mode_switch(int id, const char *mode_name)
     pthread_mutex_lock(&g_lc_lock);
     lc_record_t *rec = find_or_create(id);
     pthread_mutex_unlock(&g_lc_lock);
-    if (!rec) { printf("[CC] intersection registry full\n"); return; }
+    if (!rec) { printf("[CC] can't track more than %d intersections\n", MAX_TRACKED_LC); return; }
 
     control_mode_t mode;
     if      (!strcmp(mode_name, "fixed"))  mode = MODE_FIXED_TIMING;
     else if (!strcmp(mode_name, "sensor")) mode = MODE_SENSOR_DRIVEN;
-    else { printf("[CC] unknown mode '%s'\n", mode_name); return; }
+    else { printf("[CC] unknown mode '%s' (use fixed or sensor)\n", mode_name); return; }
 
     net_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
@@ -612,7 +592,7 @@ static void operator_console_task(void)
         else if (!strcmp(verb, "override") && n == 3) do_override(atoi(a1), a2);
         else if (!strcmp(verb, "mode") && n == 3) do_mode_switch(atoi(a1), a2);
         else if (!strcmp(verb, "verbose") && n == 2) do_verbose(a1);
-        else printf("[CC] unrecognised command\n");
+        else printf("[CC] unrecognized command\n");
         fflush(stdout);
     }
 }
@@ -645,6 +625,6 @@ int main(void)
     pthread_create(&th, NULL, command_worker, NULL);
     pthread_detach(th);
 
-    operator_console_task();  /* runs on main thread until "quit" */
+    operator_console_task();  /* returns on "quit" */
     return 0;
 }

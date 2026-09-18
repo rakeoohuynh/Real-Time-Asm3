@@ -1,24 +1,22 @@
-/* =====================================================================
- * pedestrian.h -- Pedestrian_Input_Task and pedestrian sequencing.
- *
- * Covers the debounce and latch on the input side (A11/A12) and the
- * WALK -> CLEARANCE -> DONT_WALK sequence on the output side (A8/A9).
- * ===================================================================== */
+/*
+ * pedestrian.h -- Pedestrian_Input_Task and the WALK -> CLEARANCE ->
+ * DONT_WALK sequence.
+ */
 #ifndef PEDESTRIAN_H
 #define PEDESTRIAN_H
 
 #include "lc_context.h"
 
-/* Input side: a button press arriving from the (simulated) hardware. */
+/* Button press from the (simulated) push button. Debounced, then latched
+ * until the crossing is served; extra presses meanwhile are ignored. */
 void pedestrian_input_handle_press(lc_context_t *ctx);
 
-/* Is a request latched and still unserviced. */
 int  pedestrian_request_pending(lc_context_t *ctx);
 
-/* Output side: start WALK. Called at a safe ALL-RED boundary. */
+/* Starts WALK. Only call this at an all-red boundary. */
 void pedestrian_begin_walk(lc_context_t *ctx);
 
-/* Handle the expiry of a pedestrian step. Returns 1 if handled. */
+/* Returns 1 if the expired step was a pedestrian step. */
 int  pedestrian_advance(lc_context_t *ctx);
 
 /* Scaled ms until WALK + CLEARANCE ends, 0 when no crossing is running.
